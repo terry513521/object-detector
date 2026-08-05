@@ -64,6 +64,73 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _cache_lock = threading.Lock()
 _model_cache: dict[str, dict[str, Any]] = {}
+_pt_meta_cache: dict[str, tuple[float, int, list[str], list[float]]] = {}
+_device: str | None = None
+_runtime_ready = False
+
+
+def get_device() -> str:
+    global _device
+    if _device is None:
+        try:
+            import torch
+
+            _device = "0" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            _device = "cpu"
+    return _device
+
+
+def ensure_runtime_ready() -> None:
+    """One-time CUDA / ORT warm-up so the first user request is not a 30–60s hit."""
+    global _runtime_ready
+    if _runtime_ready:
+        return
+    with _cache_lock:
+        if _runtime_ready:
+            return
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.zeros(1, device="cuda").item()
+                torch.cuda.synchronize()
+        except Exception as e:
+            print(f"torch cuda warm-up skipped: {e}")
+        try:
+            import onnxruntime as ort
+
+            so = ort.SessionOptions()
+            so.log_severity_level = 3
+            # Tiny no-op: just force EP libs to load if CUDA is listed
+            print("ORT providers:", ort.get_available_providers())
+        except Exception as e:
+            print(f"ORT warm-up skipped: {e}")
+        _runtime_ready = True
+
+
+def _ort_providers() -> list[str]:
+    try:
+        import onnxruntime as ort
+
+        available = set(ort.get_available_providers())
+    except Exception:
+        return ["CPUExecutionProvider"]
+    order = []
+    for p in ("CUDAExecutionProvider", "CPUExecutionProvider"):
+        if p in available:
+            order.append(p)
+    return order or ["CPUExecutionProvider"]
+
+
+@dataclass
+class DetBox:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+    cls_id: int
+    conf: float
 
 
 class ModelInfo(BaseModel):
@@ -77,16 +144,18 @@ class ModelInfo(BaseModel):
     uploaded: bool = False
     default_imgsz: int | None = None
     default_conf: float = 0.25
+    class_names: list[str] = []
+    default_confs: list[float] = []
 
 
-@dataclass
-class DetBox:
-    x1: int
-    y1: int
-    x2: int
-    y2: int
-    cls_id: int
-    conf: float
+# Sensible car-wash defaults when class set matches.
+_CW_DEFAULT_CONFS = {
+    "broom": 0.35,
+    "drainage gate": 0.70,
+    "drainage_gate": 0.70,
+    "nozzle": 0.40,
+    "track": 0.70,
+}
 
 
 def _find_onnx(folder: Path) -> Path | None:
@@ -144,6 +213,65 @@ def _imgsz_from_pt(path: Path) -> int:
         return 640
 
 
+def _names_from_pt(path: Path) -> list[str]:
+    try:
+        import torch
+
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        model = ckpt.get("model")
+        names = getattr(model, "names", None) if model is not None else None
+        if isinstance(names, dict):
+            return [str(names[i]) for i in sorted(names)]
+        if isinstance(names, (list, tuple)):
+            return [str(n) for n in names]
+    except Exception:
+        pass
+    return list(FALLBACK_NAMES)
+
+
+def _default_confs_for(names: list[str]) -> list[float]:
+    out: list[float] = []
+    for n in names:
+        key = n.lower().strip()
+        out.append(float(_CW_DEFAULT_CONFS.get(key, _CW_DEFAULT_CONFS.get(key.replace("_", " "), 0.25))))
+    return out
+
+
+def _pt_meta(path: Path) -> tuple[int, list[str], list[float]]:
+    key = str(path.resolve())
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cached = _pt_meta_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1], cached[2], cached[3]
+    # Single torch.load for both imgsz + names
+    imgsz = 640
+    names = list(FALLBACK_NAMES)
+    try:
+        import torch
+
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        args = ckpt.get("train_args") or {}
+        raw = args.get("imgsz")
+        if isinstance(raw, (list, tuple)):
+            imgsz = int(raw[0])
+        elif raw is not None:
+            imgsz = int(raw)
+        model = ckpt.get("model")
+        n = getattr(model, "names", None) if model is not None else None
+        if isinstance(n, dict):
+            names = [str(n[i]) for i in sorted(n)]
+        elif isinstance(n, (list, tuple)):
+            names = [str(x) for x in n]
+    except Exception:
+        pass
+    confs = _default_confs_for(names)
+    _pt_meta_cache[key] = (mtime, imgsz, names, confs)
+    return imgsz, names, confs
+
+
 def _append_miner(models: list[ModelInfo], seen: set[Path], folder: Path) -> None:
     resolved = folder.resolve()
     if resolved in seen or not _is_miner_model(folder):
@@ -175,6 +303,7 @@ def _append_pt(models: list[ModelInfo], seen: set[Path], pt: Path, name: str | N
         return
     seen.add(resolved)
     group = _group_for(pt)
+    imgsz, names, confs = _pt_meta(pt)
     models.append(
         ModelInfo(
             id=_model_id_for(pt),
@@ -185,8 +314,10 @@ def _append_pt(models: list[ModelInfo], seen: set[Path], pt: Path, name: str | N
             weights_mb=round(pt.stat().st_size / (1024 * 1024), 2),
             kind="pt",
             uploaded=(group == "uploads"),
-            default_imgsz=_imgsz_from_pt(pt),
-            default_conf=0.25,
+            default_imgsz=imgsz,
+            default_conf=float(min(confs) if confs else 0.25),
+            class_names=[display_name(n) for n in names],
+            default_confs=confs,
         )
     )
 
@@ -258,11 +389,13 @@ def _resolve_model(model_id: str) -> tuple[str, Path]:
 
 
 def load_model(model_id: str) -> dict[str, Any]:
+    ensure_runtime_ready()
     with _cache_lock:
         if model_id in _model_cache:
             return _model_cache[model_id]
 
     kind, path = _resolve_model(model_id)
+    device = get_device()
     if kind == "miner":
         folder = path
         mod_name = "viewer_miner_" + re.sub(r"[^A-Za-z0-9_]", "_", model_id)
@@ -272,18 +405,58 @@ def load_model(model_id: str) -> dict[str, Any]:
         mod = importlib.util.module_from_spec(spec)
         try:
             spec.loader.exec_module(mod)
+            # Skip multi-iter miner warm-up; we warm CUDA once at process start
+            # and do a single real-frame warm predict below.
+            if hasattr(mod.Miner, "_warmup"):
+                mod.Miner._warmup = lambda self, iters=1: None  # type: ignore[method-assign]
             obj = mod.Miner(folder)
+            # Prefer CUDA session if miner fell back / ignored providers
+            try:
+                import onnxruntime as ort
+
+                providers = obj.session.get_providers()
+                if "CUDAExecutionProvider" not in providers and "CUDAExecutionProvider" in ort.get_available_providers():
+                    onnx_path = folder / "weights.onnx"
+                    if not onnx_path.is_file():
+                        onnx_path = next(folder.glob("*.onnx"))
+                    so = ort.SessionOptions()
+                    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                    obj.session = ort.InferenceSession(
+                        str(onnx_path), sess_options=so, providers=_ort_providers(),
+                    )
+                    print("Rebuilt ORT session with", obj.session.get_providers())
+            except Exception as e:
+                print(f"ORT session rebuild skipped: {e}")
+            # One warm inference
+            try:
+                dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+                obj.predict_batch([dummy], 0, 0)
+            except Exception as e:
+                print(f"miner warm predict skipped: {e}")
         except Exception as e:
             raise HTTPException(500, f"Miner init failed: {e}") from e
-        entry = {"kind": "miner", "obj": obj, "path": folder}
+        entry = {
+            "kind": "miner",
+            "obj": obj,
+            "path": folder,
+            "device": "cuda" if "CUDAExecutionProvider" in getattr(obj.session, "get_providers", lambda: [])() else "cpu",
+        }
     else:
         try:
             from ultralytics import YOLO
 
             obj = YOLO(str(path))
+            # Move / warm on target device once
+            imgsz = 640
+            try:
+                imgsz = _pt_meta(path)[0]
+            except Exception:
+                pass
+            dummy = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
+            obj.predict(dummy, imgsz=imgsz, device=device, verbose=False)
         except Exception as e:
             raise HTTPException(500, f"YOLO .pt load failed: {e}") from e
-        entry = {"kind": "pt", "obj": obj, "path": path}
+        entry = {"kind": "pt", "obj": obj, "path": path, "device": device}
 
     with _cache_lock:
         _model_cache[model_id] = entry
@@ -321,40 +494,155 @@ def predict_miner(entry: dict[str, Any], image: np.ndarray) -> list[DetBox]:
 def predict_pt(
     entry: dict[str, Any],
     image: np.ndarray,
-    conf: float,
+    conf: float | None,
     imgsz: int,
-) -> list[DetBox]:
-    conf = float(np.clip(conf, 0.01, 0.99))
+    confs: list[float] | None = None,
+) -> tuple[list[DetBox], list[float]]:
+    names = class_names_for(entry)
+    n_cls = max(1, len(names))
+    if confs is None or len(confs) == 0:
+        thr = [float(np.clip(conf if conf is not None else 0.25, 0.01, 0.99))] * n_cls
+    else:
+        thr = [float(np.clip(c, 0.01, 0.99)) for c in confs]
+        if len(thr) < n_cls:
+            thr = thr + [thr[-1]] * (n_cls - len(thr))
+        elif len(thr) > n_cls:
+            thr = thr[:n_cls]
+
+    floor = float(min(thr)) if thr else 0.25
     imgsz = int(np.clip(imgsz, 32, 2048))
-    # Ultralytics accepts BGR numpy
+    device = entry.get("device") or get_device()
     results = entry["obj"].predict(
         source=image,
-        conf=conf,
+        conf=floor,
         imgsz=imgsz,
+        device=device,
         verbose=False,
     )
     out: list[DetBox] = []
     if not results:
-        return out
+        return out, thr
     r0 = results[0]
     if r0.boxes is None or len(r0.boxes) == 0:
-        return out
+        return out, thr
     xyxy = r0.boxes.xyxy.cpu().numpy()
     scores = r0.boxes.conf.cpu().numpy()
     clss = r0.boxes.cls.cpu().numpy().astype(int)
     h, w = image.shape[:2]
     for (x1, y1, x2, y2), sc, cid in zip(xyxy, scores, clss):
+        cid_i = int(cid)
+        t = thr[cid_i] if 0 <= cid_i < len(thr) else floor
+        if float(sc) < t:
+            continue
         out.append(
             DetBox(
                 x1=max(0, min(w, int(x1))),
                 y1=max(0, min(h, int(y1))),
                 x2=max(0, min(w, int(x2))),
                 y2=max(0, min(h, int(y2))),
-                cls_id=int(cid),
+                cls_id=cid_i,
                 conf=float(sc),
             )
         )
-    return out
+    return out, thr
+
+
+def parse_confs_form(confs_raw: str | None, conf: float, n_hint: int = 4) -> list[float] | None:
+    """Parse confs JSON array from form; None means use single conf."""
+    if confs_raw:
+        try:
+            import json
+
+            data = json.loads(confs_raw)
+            if isinstance(data, list) and data:
+                return [float(x) for x in data]
+        except Exception:
+            pass
+    return None
+
+
+@app.post("/api/predict")
+async def api_predict(
+    model_id: str = Form(...),
+    file: UploadFile = File(...),
+    conf: float = Form(0.25),
+    imgsz: int = Form(640),
+    confs: str = Form(""),
+):
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(400, "Empty file")
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(400, "Could not decode image")
+
+    t_load0 = time.perf_counter()
+    try:
+        entry = load_model(model_id)
+        names = class_names_for(entry)
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"Model load failed: {e}") from e
+    load_ms = (time.perf_counter() - t_load0) * 1000
+
+    t0 = time.perf_counter()
+    try:
+        if entry["kind"] == "miner":
+            boxes = predict_miner(entry, image)
+            used_conf = None
+            used_confs = None
+            used_imgsz = None
+        else:
+            conf_list = parse_confs_form(confs, conf, len(names))
+            boxes, used_confs = predict_pt(
+                entry, image, conf=conf, imgsz=imgsz, confs=conf_list,
+            )
+            used_conf = float(min(used_confs)) if used_confs else float(conf)
+            used_imgsz = int(np.clip(imgsz, 32, 2048))
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"Inference failed: {e}") from e
+    ms = (time.perf_counter() - t0) * 1000
+
+    annotated = draw_boxes(image, boxes, names)
+    detections = [
+        {
+            "cls_id": int(b.cls_id),
+            "class": display_name(
+                names[int(b.cls_id)] if 0 <= int(b.cls_id) < len(names) else f"cls{b.cls_id}"
+            ),
+            "conf": round(float(b.conf), 4),
+            "bbox": [int(b.x1), int(b.y1), int(b.x2), int(b.y2)],
+        }
+        for b in boxes
+    ]
+    counts: dict[str, int] = {}
+    for d in detections:
+        counts[d["class"]] = counts.get(d["class"], 0) + 1
+
+    return {
+        "model_id": model_id,
+        "kind": entry["kind"],
+        "width": int(image.shape[1]),
+        "height": int(image.shape[0]),
+        "inference_ms": round(ms, 1),
+        "load_ms": round(load_ms, 1),
+        "num_detections": len(detections),
+        "counts": counts,
+        "class_names": [display_name(n) for n in names],
+        "detections": detections,
+        "conf": used_conf,
+        "confs": used_confs,
+        "imgsz": used_imgsz,
+        "device": entry.get("device"),
+        "image_b64": encode_jpeg_b64(annotated),
+        "original_b64": encode_jpeg_b64(image, quality=85),
+    }
 
 
 def draw_boxes(
@@ -450,6 +738,12 @@ def _ensure_weights_onnx(folder: Path) -> None:
     if onnx is None:
         return
     shutil.copy2(onnx, folder / "weights.onnx")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    # Kick CUDA/ORT in background so first click is fast
+    threading.Thread(target=ensure_runtime_ready, daemon=True).start()
 
 
 @app.get("/")
@@ -569,73 +863,6 @@ def api_delete_uploaded(model_name: str):
             _model_cache.pop(mid, None)
     shutil.rmtree(dest)
     return {"ok": True, "deleted": model_name}
-
-
-@app.post("/api/predict")
-async def api_predict(
-    model_id: str = Form(...),
-    file: UploadFile = File(...),
-    conf: float = Form(0.25),
-    imgsz: int = Form(640),
-):
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(400, "Empty file")
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(400, "Could not decode image")
-
-    t0 = time.perf_counter()
-    try:
-        entry = load_model(model_id)
-        names = class_names_for(entry)
-        if entry["kind"] == "miner":
-            boxes = predict_miner(entry, image)
-            used_conf = None
-            used_imgsz = None
-        else:
-            boxes = predict_pt(entry, image, conf=conf, imgsz=imgsz)
-            used_conf = float(np.clip(conf, 0.01, 0.99))
-            used_imgsz = int(np.clip(imgsz, 32, 2048))
-    except HTTPException:
-        raise
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(500, f"Inference failed: {e}") from e
-    ms = (time.perf_counter() - t0) * 1000
-
-    annotated = draw_boxes(image, boxes, names)
-    detections = [
-        {
-            "cls_id": int(b.cls_id),
-            "class": display_name(
-                names[int(b.cls_id)] if 0 <= int(b.cls_id) < len(names) else f"cls{b.cls_id}"
-            ),
-            "conf": round(float(b.conf), 4),
-            "bbox": [int(b.x1), int(b.y1), int(b.x2), int(b.y2)],
-        }
-        for b in boxes
-    ]
-    counts: dict[str, int] = {}
-    for d in detections:
-        counts[d["class"]] = counts.get(d["class"], 0) + 1
-
-    return {
-        "model_id": model_id,
-        "kind": entry["kind"],
-        "width": int(image.shape[1]),
-        "height": int(image.shape[0]),
-        "inference_ms": round(ms, 1),
-        "num_detections": len(detections),
-        "counts": counts,
-        "class_names": [display_name(n) for n in names],
-        "detections": detections,
-        "conf": used_conf,
-        "imgsz": used_imgsz,
-        "image_b64": encode_jpeg_b64(annotated),
-        "original_b64": encode_jpeg_b64(image, quality=85),
-    }
 
 
 @app.post("/api/unload")
