@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Object Detector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f1419;
+      --bg-elev: #171e26;
+      --bg-panel: #1c2530;
+      --line: #2a3544;
+      --text: #e8eef4;
+      --muted: #8b9aab;
+      --accent: #2ec4b6;
+      --accent-dim: rgba(46, 196, 182, 0.15);
+      --warn: #ff9f1c;
+      --danger: #e74c3c;
+      --blue: #3498db;
+      --radius: 10px;
+      --font: "DM Sans", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(1200px 600px at 10% -10%, #1a2a32 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #1e2430 0%, transparent 50%),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: 100vh;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    aside {
+      border-right: 1px solid var(--line);
+      background: rgba(23, 30, 38, 0.85);
+      backdrop-filter: blur(8px);
+      padding: 1.5rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .brand h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .brand p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+
+    label.field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    select, button {
+      font-family: inherit;
+    }
+
+    select {
+      appearance: none;
+      background: var(--bg-panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%238b9aab' d='M1 1l5 5 5-5'/%3E%3C/svg%3E") right 0.85rem center / 12px no-repeat;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.7rem 2rem 0.7rem 0.85rem;
+      font-size: 0.9rem;
+      outline: none;
+    }
+    select:focus { border-color: var(--accent); }
+
+    .model-meta {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+      line-height: 1.5;
+      padding: 0.65rem 0.75rem;
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      word-break: break-all;
+    }
+
+    .legend {
+      display: grid;
+      gap: 0.45rem;
+    }
+    .legend span {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+      flex-shrink: 0;
+    }
+
+    main {
+      padding: 1.5rem 1.75rem 2.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      min-width: 0;
+    }
+
+    .drop {
+      border: 1.5px dashed var(--line);
+      border-radius: var(--radius);
+      background: var(--bg-elev);
+      min-height: 180px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 1.5rem;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      position: relative;
+    }
+    .drop.dragover {
+      border-color: var(--accent);
+      background: var(--accent-dim);
+    }
+    .drop input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+    .drop-inner strong {
+      display: block;
+      font-size: 1.05rem;
+      margin-bottom: 0.35rem;
+    }
+    .drop-inner span {
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .btn {
+      border: none;
+      border-radius: 8px;
+      padding: 0.65rem 1.1rem;
+      font-weight: 600;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-primary {
+      background: var(--accent);
+      color: #06221f;
+    }
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--line);
+    }
+
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-left: auto;
+    }
+    .pill {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      padding: 0.35rem 0.65rem;
+      border-radius: 999px;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .pill strong { color: var(--text); font-weight: 500; }
+
+    .stage {
+      display: grid;
+      grid-template-columns: 1fr 300px;
+      gap: 1rem;
+      min-height: 420px;
+    }
+
+    .canvas-wrap {
+      background: #0a0e12;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+      min-height: 420px;
+    }
+    .canvas-wrap img {
+      max-width: 100%;
+      max-height: min(72vh, 820px);
+      object-fit: contain;
+      display: block;
+    }
+    .empty-hint {
+      color: var(--muted);
+      font-size: 0.95rem;
+      padding: 2rem;
+      text-align: center;
+    }
+
+    .panel {
+      background: var(--bg-elev);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      max-height: min(72vh, 820px);
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 0.85rem 1rem;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--line);
+      font-weight: 600;
+    }
+    .det-list {
+      overflow: auto;
+      flex: 1;
+      padding: 0.5rem;
+    }
+    .det {
+      display: grid;
+      grid-template-columns: 10px 1fr auto;
+      gap: 0.55rem;
+      align-items: start;
+      padding: 0.55rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+    .det:hover { background: rgba(255,255,255,0.03); }
+    .det .name { font-weight: 600; }
+    .det .bbox {
+      grid-column: 2 / -1;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+    .det .conf {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .status {
+      font-size: 0.85rem;
+      color: var(--muted);
+      min-height: 1.2em;
+    }
+    .status.error { color: var(--danger); }
+    .status.busy { color: var(--warn); }
+
+    .toggle-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .toggle-row input { accent-color: var(--accent); }
+
+    .upload-box {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--bg);
+      padding: 0.85rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+    .upload-box h3 {
+      margin: 0;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .upload-box input[type="text"] {
+      width: 100%;
+      background: var(--bg-panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0.55rem 0.7rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      outline: none;
+    }
+    .upload-box input[type="text"]:focus { border-color: var(--accent); }
+    .upload-hint {
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .upload-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+    }
+    .btn-danger {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid rgba(231, 76, 60, 0.45);
+    }
+    .file-chip {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .model-drop {
+      border: 1.5px dashed var(--line);
+      border-radius: 8px;
+      background: var(--bg-panel);
+      min-height: 88px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 0.85rem 0.75rem;
+      cursor: pointer;
+      position: relative;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .model-drop.dragover {
+      border-color: var(--accent);
+      background: var(--accent-dim);
+    }
+    .model-drop input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+    .model-drop-inner strong {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 0.25rem;
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .model-drop-inner span {
+      display: block;
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: 0;
+      line-height: 1.35;
+    }
+    .badge-up {
+      display: inline-block;
+      margin-left: 0.35rem;
+      font-size: 0.65rem;
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      vertical-align: middle;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    @media (max-width: 980px) {
+      .shell { grid-template-columns: 1fr; }
+      aside {
+        position: relative;
+        height: auto;
+        border-right: none;
+        border-bottom: 1px solid var(--line);
+      }
+      .stage { grid-template-columns: 1fr; }
+      .panel { max-height: 320px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <h1>Object Detector</h1>
+        <p>Select a miner + ONNX pair, drop an image, inspect boxes and classes.</p>
+      </div>
+
+      <label class="field">
+        Model
+        <select id="modelSelect"></select>
+      </label>
+
+      <div class="model-meta" id="modelMeta">Scanning models…</div>
+
+      <div class="upload-actions" id="modelActions" style="display:none">
+        <button class="btn btn-danger" type="button" id="deleteModelBtn">Delete uploaded</button>
+      </div>
+
+      <div class="upload-box">
+        <h3>Upload model</h3>
+        <label class="field">
+          Name
+          <input type="text" id="uploadName" placeholder="my_model" autocomplete="off" />
+        </label>
+        <label class="field">
+          Files
+          <input type="file" id="uploadFiles" multiple accept=".py,.onnx,.zip,.yml,.yaml,.json,.txt,.md" />
+        </label>
+        <div class="file-chip" id="uploadFileList">ZIP with miner.py + onnx, or select both files</div>
+        <label class="toggle-row">
+          <input type="checkbox" id="uploadOverwrite" />
+          Overwrite if exists
+        </label>
+        <button class="btn btn-primary" type="button" id="uploadBtn">Upload to server</button>
+        <p class="upload-hint">Saved under <code>viewer/uploads/</code>. Appears in the Model list under <b>uploads</b>.</p>
+      </div>
+
+      <div class="legend" id="legend">
+        <span><i class="swatch" style="background:#2ec4b6"></i> broom</span>
+        <span><i class="swatch" style="background:#ff9f1c"></i> drainage gate</span>
+        <span><i class="swatch" style="background:#e74c3c"></i> nozzle</span>
+        <span><i class="swatch" style="background:#3498db"></i> track</span>
+      </div>
+    </aside>
+
+    <main>
+      <div class="drop" id="dropzone">
+        <input type="file" id="fileInput" accept="image/*" />
+        <div class="drop-inner">
+          <strong>Drop an image here</strong>
+          <span>or click to browse · JPG / PNG / WEBP</span>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <button class="btn btn-primary" id="runBtn" disabled>Run detection</button>
+        <button class="btn btn-ghost" id="clearBtn" disabled>Clear</button>
+        <label class="toggle-row">
+          <input type="checkbox" id="showOriginal" />
+          Show original
+        </label>
+        <div class="stats" id="stats"></div>
+      </div>
+
+      <div class="status" id="status"></div>
+
+      <div class="stage">
+        <div class="canvas-wrap" id="canvas">
+          <div class="empty-hint">Prediction will appear here</div>
+        </div>
+        <div class="panel">
+          <h2>Detections</h2>
+          <div class="det-list" id="detList">
+            <div class="empty-hint" style="padding:1rem">No results yet</div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const COLORS = {
+      "broom": "#2ec4b6",
+      "drainage gate": "#ff9f1c",
+      "nozzle": "#e74c3c",
+      "track": "#3498db",
+    };
+
+    const els = {
+      select: document.getElementById("modelSelect"),
+      meta: document.getElementById("modelMeta"),
+      drop: document.getElementById("dropzone"),
+      file: document.getElementById("fileInput"),
+      run: document.getElementById("runBtn"),
+      clear: document.getElementById("clearBtn"),
+      status: document.getElementById("status"),
+      canvas: document.getElementById("canvas"),
+      detList: document.getElementById("detList"),
+      stats: document.getElementById("stats"),
+      showOriginal: document.getElementById("showOriginal"),
+      uploadName: document.getElementById("uploadName"),
+      uploadFiles: document.getElementById("uploadFiles"),
+      uploadFileList: document.getElementById("uploadFileList"),
+      uploadOverwrite: document.getElementById("uploadOverwrite"),
+      uploadBtn: document.getElementById("uploadBtn"),
+      deleteBtn: document.getElementById("deleteModelBtn"),
+      modelActions: document.getElementById("modelActions"),
+    };
+
+    let models = [];
+    let selectedFile = null;
+    let lastResult = null;
+
+    function setStatus(msg, kind = "") {
+      els.status.textContent = msg || "";
+      els.status.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function detailMessage(detail) {
+      if (typeof detail === "string") return detail;
+      if (Array.isArray(detail)) return detail.map((d) => d.msg || JSON.stringify(d)).join("; ");
+      return detail ? JSON.stringify(detail) : "Request failed";
+    }
+
+    function updateMeta() {
+      const m = models.find((x) => x.id === els.select.value);
+      if (!m) {
+        els.meta.textContent = "No models found";
+        els.modelActions.style.display = "none";
+        return;
+      }
+      const badge = m.uploaded ? `<span class="badge-up">uploaded</span>` : "";
+      els.meta.innerHTML =
+        `<div><b>${m.name}</b>${badge}</div>` +
+        `<div>${m.group}</div>` +
+        `<div>${m.onnx} · ${m.onnx_mb} MB</div>` +
+        `<div>${m.path}</div>`;
+      els.modelActions.style.display = m.uploaded ? "flex" : "none";
+    }
+
+    async function loadModels(selectId) {
+      const res = await fetch("/api/models");
+      const data = await res.json();
+      models = data.models || [];
+      const prefer = selectId || els.select.value;
+      els.select.innerHTML = "";
+      if (!models.length) {
+        els.select.innerHTML = `<option value="">(none found)</option>`;
+        updateMeta();
+        return;
+      }
+      // Keep uploads first in UI order (API already sorts)
+      const groups = {};
+      const groupOrder = [];
+      for (const m of models) {
+        if (!groups[m.group]) {
+          groups[m.group] = [];
+          groupOrder.push(m.group);
+        }
+        groups[m.group].push(m);
+      }
+      for (const g of groupOrder) {
+        const og = document.createElement("optgroup");
+        og.label = g === "uploads" ? "uploads (yours)" : g;
+        for (const m of groups[g]) {
+          const opt = document.createElement("option");
+          opt.value = m.id;
+          opt.textContent = m.uploaded ? `${m.name} ★` : m.name;
+          og.appendChild(opt);
+        }
+        els.select.appendChild(og);
+      }
+      if (prefer && models.some((m) => m.id === prefer)) {
+        els.select.value = prefer;
+      }
+      updateMeta();
+      els.run.disabled = !(selectedFile && els.select.value);
+    }
+
+    function setFile(file) {
+      if (!file || !file.type.startsWith("image/")) {
+        setStatus("Please choose an image file", "error");
+        return;
+      }
+      selectedFile = file;
+      lastResult = null;
+      els.run.disabled = !els.select.value;
+      els.clear.disabled = false;
+      els.stats.innerHTML = "";
+      const url = URL.createObjectURL(file);
+      els.canvas.innerHTML = `<img src="${url}" alt="input" />`;
+      els.detList.innerHTML = `<div class="empty-hint" style="padding:1rem">Ready — click Run detection</div>`;
+      setStatus(`Selected: ${file.name} (${(file.size / 1024).toFixed(0)} KB)`);
+    }
+
+    function renderResult(data) {
+      lastResult = data;
+      const showOrig = els.showOriginal.checked;
+      const b64 = showOrig ? data.original_b64 : data.image_b64;
+      els.canvas.innerHTML = `<img src="data:image/jpeg;base64,${b64}" alt="result" />`;
+
+      const countBits = Object.entries(data.counts || {})
+        .map(([k, v]) => `<span class="pill">${k} <strong>${v}</strong></span>`)
+        .join("");
+      els.stats.innerHTML =
+        `<span class="pill">boxes <strong>${data.num_detections}</strong></span>` +
+        `<span class="pill">time <strong>${data.inference_ms} ms</strong></span>` +
+        `<span class="pill">${data.width}×${data.height}</span>` +
+        countBits;
+
+      if (!data.detections.length) {
+        els.detList.innerHTML = `<div class="empty-hint" style="padding:1rem">No detections</div>`;
+        return;
+      }
+      els.detList.innerHTML = data.detections
+        .slice()
+        .sort((a, b) => b.conf - a.conf)
+        .map((d) => {
+          const c = COLORS[d.class] || "#aaa";
+          const [x1, y1, x2, y2] = d.bbox;
+          return `<div class="det">
+            <i class="swatch" style="background:${c};margin-top:4px"></i>
+            <div>
+              <div class="name">${d.class}</div>
+              <div class="bbox">${x1},${y1} → ${x2},${y2}</div>
+            </div>
+            <div class="conf">${d.conf.toFixed(3)}</div>
+          </div>`;
+        })
+        .join("");
+    }
+
+    async function run() {
+      if (!selectedFile || !els.select.value) return;
+      els.run.disabled = true;
+      setStatus("Running inference (first load may take a while)…", "busy");
+      const fd = new FormData();
+      fd.append("model_id", els.select.value);
+      fd.append("file", selectedFile, selectedFile.name);
+      try {
+        const res = await fetch("/api/predict", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(detailMessage(data.detail) || res.statusText);
+        renderResult(data);
+        setStatus(`Done — ${data.num_detections} boxes`);
+      } catch (e) {
+        setStatus(String(e.message || e), "error");
+      } finally {
+        els.run.disabled = !selectedFile;
+      }
+    }
+
+    function refreshUploadFileList() {
+      const files = [...(els.uploadFiles.files || [])];
+      if (!files.length) {
+        els.uploadFileList.textContent = "ZIP with miner.py + onnx, or select both files";
+        return;
+      }
+      els.uploadFileList.textContent = files
+        .map((f) => `${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`)
+        .join(" · ");
+      // Autofill name from zip or folder-ish filename
+      if (!els.uploadName.value.trim() && files[0]) {
+        let base = files[0].name.replace(/\.(zip|onnx|py)$/i, "");
+        if (base === "weights" || base === "miner") {
+          const other = files.find((f) => !/^(weights|miner)/i.test(f.name));
+          if (other) base = other.name.replace(/\.(zip|onnx|py)$/i, "");
+        }
+        els.uploadName.value = base.replace(/[^\w.-]+/g, "_").slice(0, 64);
+      }
+    }
+
+    async function uploadModel() {
+      const name = els.uploadName.value.trim();
+      const files = [...(els.uploadFiles.files || [])];
+      if (!name) {
+        setStatus("Enter a model name", "error");
+        return;
+      }
+      if (!files.length) {
+        setStatus("Choose a zip or miner.py + onnx files", "error");
+        return;
+      }
+      els.uploadBtn.disabled = true;
+      setStatus("Uploading model…", "busy");
+      const fd = new FormData();
+      fd.append("name", name);
+      fd.append("overwrite", els.uploadOverwrite.checked ? "true" : "false");
+      for (const f of files) fd.append("files", f, f.name);
+      try {
+        const res = await fetch("/api/models/upload", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) throw new Error(detailMessage(data.detail) || res.statusText);
+        els.uploadFiles.value = "";
+        refreshUploadFileList();
+        await loadModels(data.model.id);
+        setStatus(`Uploaded ${data.model.name} — selected in Model list`);
+      } catch (e) {
+        setStatus(String(e.message || e), "error");
+      } finally {
+        els.uploadBtn.disabled = false;
+      }
+    }
+
+    async function deleteUploaded() {
+      const m = models.find((x) => x.id === els.select.value);
+      if (!m || !m.uploaded) return;
+      if (!confirm(`Delete uploaded model "${m.name}"?`)) return;
+      setStatus(`Deleting ${m.name}…`, "busy");
+      try {
+        const res = await fetch(`/api/models/${encodeURIComponent(m.name)}`, { method: "DELETE" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(detailMessage(data.detail) || res.statusText);
+        await loadModels();
+        setStatus(`Deleted ${m.name}`);
+      } catch (e) {
+        setStatus(String(e.message || e), "error");
+      }
+    }
+
+    els.select.addEventListener("change", () => {
+      updateMeta();
+      els.run.disabled = !(selectedFile && els.select.value);
+    });
+    els.file.addEventListener("change", (e) => setFile(e.target.files[0]));
+    els.drop.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      els.drop.classList.add("dragover");
+    });
+    els.drop.addEventListener("dragleave", () => els.drop.classList.remove("dragover"));
+    els.drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      els.drop.classList.remove("dragover");
+      setFile(e.dataTransfer.files[0]);
+    });
+    els.run.addEventListener("click", run);
+    els.clear.addEventListener("click", () => {
+      selectedFile = null;
+      lastResult = null;
+      els.file.value = "";
+      els.run.disabled = true;
+      els.clear.disabled = true;
+      els.canvas.innerHTML = `<div class="empty-hint">Prediction will appear here</div>`;
+      els.detList.innerHTML = `<div class="empty-hint" style="padding:1rem">No results yet</div>`;
+      els.stats.innerHTML = "";
+      setStatus("");
+    });
+    els.showOriginal.addEventListener("change", () => {
+      if (lastResult) renderResult(lastResult);
+    });
+    els.uploadFiles.addEventListener("change", refreshUploadFileList);
+    els.uploadBtn.addEventListener("click", uploadModel);
+    els.deleteBtn.addEventListener("click", deleteUploaded);
+
+    loadModels().catch((e) => setStatus(String(e), "error"));
+  </script>
+</body>
+</html>
