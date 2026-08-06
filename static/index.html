@@ -39,14 +39,13 @@
 
     .shell {
       display: grid;
-      grid-template-columns: 320px 1fr;
+      grid-template-columns: 320px minmax(0, 1fr) 340px;
       min-height: 100vh;
-      max-width: 1600px;
+      max-width: 1920px;
       margin: 0 auto;
     }
 
     aside {
-      border-right: 1px solid var(--line);
       background: rgba(23, 30, 38, 0.85);
       backdrop-filter: blur(8px);
       padding: 1.5rem 1.25rem;
@@ -57,6 +56,14 @@
       top: 0;
       height: 100vh;
       overflow: auto;
+    }
+    aside.sidebar-left {
+      border-right: 1px solid var(--line);
+    }
+    aside.sidebar-right {
+      border-left: 1px solid var(--line);
+      gap: 1rem;
+      overflow: hidden;
     }
 
     .brand h1 {
@@ -179,7 +186,9 @@
       flex-wrap: wrap;
       gap: 0.75rem;
       align-items: center;
+      min-height: 1.5rem;
     }
+    .toolbar .stats { margin-left: 0; }
 
     .btn {
       border: none;
@@ -202,7 +211,15 @@
       border: 1px solid rgba(231, 76, 60, 0.45);
     }
 
-    .stats { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
+    .stats {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 0.5rem;
+      margin-left: auto;
+      overflow-x: auto;
+      max-width: 100%;
+      align-items: center;
+    }
     .pill {
       font-family: var(--mono);
       font-size: 0.75rem;
@@ -216,7 +233,7 @@
 
     .stage {
       display: grid;
-      grid-template-columns: 1fr 300px;
+      grid-template-columns: 1fr 280px;
       gap: 1rem;
       min-height: 420px;
     }
@@ -321,6 +338,96 @@
       color: var(--muted);
     }
 
+    .history-head {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      flex-shrink: 0;
+    }
+    .history-head h2 {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      text-transform: none;
+    }
+    .history-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+    aside.sidebar-right > .model-meta {
+      flex-shrink: 0;
+    }
+    .history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding-right: 0.35rem;
+      overscroll-behavior: contain;
+    }
+    .history-list::-webkit-scrollbar {
+      width: 8px;
+    }
+    .history-list::-webkit-scrollbar-track {
+      background: var(--bg);
+      border-radius: 999px;
+    }
+    .history-list::-webkit-scrollbar-thumb {
+      background: #3a4656;
+      border-radius: 999px;
+    }
+    .history-list::-webkit-scrollbar-thumb:hover {
+      background: #526074;
+    }
+    .history-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--bg);
+      overflow: hidden;
+      cursor: pointer;
+      padding: 0;
+      width: 100%;
+      text-align: left;
+      color: inherit;
+      font: inherit;
+      transition: border-color 0.15s;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .history-card:hover { border-color: var(--accent); }
+    .history-card.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .history-card .history-canvas {
+      background: #0a0e12;
+      border-bottom: 1px solid var(--line);
+      min-height: 180px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .history-card .history-canvas img {
+      width: 100%;
+      max-height: 280px;
+      object-fit: contain;
+      display: block;
+    }
+    .history-card .model-meta {
+      border: none;
+      border-radius: 0;
+      margin: 0;
+    }
+
     .status { font-size: 0.85rem; color: var(--muted); min-height: 1.2em; }
     .status.error { color: var(--danger); }
     .status.busy { color: var(--warn); }
@@ -392,33 +499,42 @@
       border-top: 1px solid var(--line);
       background: rgba(23, 30, 38, 0.96);
       backdrop-filter: blur(10px);
-      padding: 0.9rem 1.75rem 1.1rem;
-      display: none;
-      gap: 1rem 1.25rem;
-      align-items: end;
-      flex-wrap: wrap;
+      padding: 0.85rem 1.5rem;
+      display: flex;
+      gap: 0.85rem 1rem;
+      align-items: center;
+      flex-wrap: nowrap;
+      overflow: hidden;
       position: sticky;
       bottom: 0;
       z-index: 5;
     }
-    .pt-bar.visible { display: flex; }
     .pt-bar .ctrl {
       display: flex;
       flex-direction: column;
-      gap: 0.35rem;
-      min-width: 160px;
-      flex: 1;
+      gap: 0.3rem;
+      min-width: 0;
     }
-    .pt-bar .ctrl.class-ctrl { min-width: 140px; max-width: 200px; flex: 1 1 140px; }
+    .pt-bar .ctrl.class-ctrl {
+      flex: 1 1 0;
+      min-width: 64px;
+      max-width: none;
+    }
+    .pt-bar .ctrl.imgsz-ctrl {
+      flex: 0 0 140px;
+      min-width: 120px;
+      max-width: 160px;
+    }
     .pt-bar .ctrl label {
-      font-size: 0.72rem;
+      font-size: clamp(0.65rem, 1.1vw, 0.78rem);
       text-transform: uppercase;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.04em;
       color: var(--muted);
       font-weight: 600;
       display: flex;
       justify-content: space-between;
-      gap: 0.5rem;
+      gap: 0.3rem;
+      min-width: 0;
     }
     .pt-bar .ctrl label .cls-name {
       text-transform: none;
@@ -426,6 +542,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      min-width: 0;
     }
     .pt-bar .ctrl label output {
       font-family: var(--mono);
@@ -434,27 +551,45 @@
       letter-spacing: 0;
       font-weight: 500;
       flex-shrink: 0;
+      font-size: clamp(0.65rem, 1.1vw, 0.8rem);
     }
     .pt-bar input[type="range"] {
       width: 100%;
       accent-color: var(--accent);
+      height: 1.2rem;
+      min-width: 0;
     }
     .pt-bar .pt-note {
-      font-size: 0.75rem;
-      color: var(--muted);
-      max-width: 260px;
-      line-height: 1.35;
-    }
-    .pt-bar .pt-note kbd {
-      font-family: var(--mono);
-      font-size: 0.7rem;
-      padding: 0.1rem 0.35rem;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background: var(--bg-panel);
-      color: var(--text);
+      display: none;
     }
     .pt-bar .imgsz-ctrl[hidden] { display: none; }
+    .pt-bar .conf-grid[hidden] { display: none; }
+    .pt-bar .actions {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 0.6rem;
+      align-items: center;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .pt-bar .actions .btn {
+      padding: 0.55rem 0.95rem;
+      font-size: 0.88rem;
+      border-radius: 7px;
+      white-space: nowrap;
+    }
+    .pt-bar .actions .toggle-row {
+      font-size: 0.88rem;
+      white-space: nowrap;
+      gap: 0.45rem;
+    }
+    .pt-bar .actions .hotkey {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 500;
+      opacity: 0.75;
+      margin-left: 0.35rem;
+    }
     .btn .hotkey {
       font-family: var(--mono);
       font-size: 0.7rem;
@@ -464,18 +599,41 @@
     }
     .pt-bar .conf-grid {
       display: flex;
-      flex-wrap: wrap;
-      gap: 0.75rem 1rem;
-      flex: 3 1 420px;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: clamp(0.35rem, 0.8vw, 0.85rem);
+      flex: 1 1 auto;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .pt-bar .conf-grid[data-count="1"] .ctrl.class-ctrl,
+    .pt-bar .conf-grid[data-count="2"] .ctrl.class-ctrl,
+    .pt-bar .conf-grid[data-count="3"] .ctrl.class-ctrl {
+      max-width: 200px;
     }
 
+    @media (max-width: 1200px) {
+      .shell { grid-template-columns: 280px minmax(0, 1fr) 300px; }
+    }
     @media (max-width: 980px) {
       .shell { grid-template-columns: 1fr; }
       aside {
         position: relative;
         height: auto;
+      }
+      aside.sidebar-left {
         border-right: none;
         border-bottom: 1px solid var(--line);
+      }
+      aside.sidebar-right {
+        border-left: none;
+        border-top: 1px solid var(--line);
+        height: auto;
+        max-height: 70vh;
+        overflow: hidden;
+      }
+      .history-list {
+        overflow-y: auto;
       }
       .stage { grid-template-columns: 1fr; }
       .panel { max-height: 320px; }
@@ -484,7 +642,7 @@
 </head>
 <body>
   <div class="shell">
-    <aside>
+    <aside class="sidebar-left">
       <div class="brand">
         <h1>Object Detector</h1>
         <p>Select miner+ONNX or a .pt model, drop an image, inspect boxes.</p>
@@ -539,12 +697,6 @@
     <div class="main-col">
       <main>
         <div class="toolbar">
-          <button class="btn btn-primary" id="runBtn" disabled>Run detection<span class="hotkey">Ctrl+Space</span></button>
-          <button class="btn btn-ghost" id="clearBtn" disabled>Clear</button>
-          <label class="toggle-row">
-            <input type="checkbox" id="showOriginal" />
-            Show original
-          </label>
           <div class="stats" id="stats"></div>
         </div>
 
@@ -569,14 +721,30 @@
 
       <div class="pt-bar" id="ptBar">
         <div class="conf-grid" id="confGrid"></div>
-        <div class="ctrl imgsz-ctrl" id="imgszCtrl">
+        <div class="ctrl imgsz-ctrl" id="imgszCtrl" hidden>
           <label>Image size <output id="imgszOut">640</output></label>
           <input type="range" id="imgszSlider" min="320" max="1280" step="32" value="640" />
         </div>
-        <button class="btn btn-primary" type="button" id="rerunBtn" disabled>Apply &amp; re-run<span class="hotkey">Ctrl+Alt+Space</span></button>
-        <p class="pt-note">Per-class confidence for <b>.pt</b> and <b>miner+ONNX</b>. Miner defaults come from <code>miner.py</code>. Image size is Ultralytics .pt only.</p>
+        <div class="actions">
+          <label class="toggle-row">
+            <input type="checkbox" id="showOriginal" />
+            Original
+          </label>
+          <button class="btn btn-primary" id="runBtn" disabled>Run detection<span class="hotkey" id="runHotkey">Ctrl+Space</span></button>
+        </div>
       </div>
     </div>
+
+    <aside class="sidebar-right">
+      <div class="history-head">
+        <h2>Saved results</h2>
+        <p>Past runs for the selected model. Click to reopen.</p>
+      </div>
+      <div class="model-meta" id="historyMeta">No model selected</div>
+      <div class="history-list" id="historyList">
+        <div class="empty-hint" style="padding:0.5rem 0">Run detection to save results for this model</div>
+      </div>
+    </aside>
   </div>
 
   <script>
@@ -599,10 +767,11 @@
       meta: document.getElementById("modelMeta"),
       file: document.getElementById("fileInput"),
       run: document.getElementById("runBtn"),
-      clear: document.getElementById("clearBtn"),
       status: document.getElementById("status"),
       canvas: document.getElementById("canvas"),
       detList: document.getElementById("detList"),
+      historyList: document.getElementById("historyList"),
+      historyMeta: document.getElementById("historyMeta"),
       stats: document.getElementById("stats"),
       showOriginal: document.getElementById("showOriginal"),
       uploadName: document.getElementById("uploadName"),
@@ -618,7 +787,6 @@
       imgszSlider: document.getElementById("imgszSlider"),
       imgszOut: document.getElementById("imgszOut"),
       imgszCtrl: document.getElementById("imgszCtrl"),
-      rerunBtn: document.getElementById("rerunBtn"),
     };
 
     let models = [];
@@ -627,6 +795,35 @@
     let uploadPicked = [];
     let classConfValues = [];
     let deviceInfo = { default: "auto", cuda_available: false };
+    let historyItems = [];
+    let activeResultId = null;
+    const resultMemCache = new Map(); // result_id -> payload
+
+    (() => {
+      const mac = /Mac|iPhone|iPad|iPod/.test(navigator.platform)
+        || (navigator.userAgentData && navigator.userAgentData.platform === "macOS");
+      const hk = document.getElementById("runHotkey");
+      if (hk) hk.textContent = mac ? "⌘+Space" : "Ctrl+Space";
+    })();
+
+    function resultImageSrc(data, wantOriginal = false) {
+      if (wantOriginal) {
+        if (data.original_url) return data.original_url;
+        if (data.original_b64) return `data:image/jpeg;base64,${data.original_b64}`;
+      } else {
+        if (data.image_url) return data.image_url;
+        if (data.image_b64) return `data:image/jpeg;base64,${data.image_b64}`;
+      }
+      return "";
+    }
+
+    function rememberResult(data) {
+      const id = data.result_id || data.id;
+      if (id) {
+        data.result_id = id;
+        resultMemCache.set(id, data);
+      }
+    }
 
     const MODEL_EXTS = /\.(py|onnx|pt|zip|yml|yaml|json|txt|md)$/i;
 
@@ -700,12 +897,14 @@
       if (!ns.length) {
         els.confGrid.innerHTML = "";
         classConfValues = [];
+        els.confGrid.removeAttribute("data-count");
         return;
       }
       const cs = (confs && confs.length === ns.length)
         ? confs
         : ns.map(() => 0.25);
       classConfValues = cs.map(Number);
+      els.confGrid.dataset.count = String(ns.length);
       els.confGrid.innerHTML = ns.map((name, i) => {
         const v = Number(cs[i]).toFixed(2);
         const color = classColor(name, i);
@@ -729,13 +928,15 @@
 
     function syncPtControls(m) {
       const hasModel = !!(m && (m.kind === "pt" || m.kind === "miner"));
-      els.ptBar.classList.toggle("visible", hasModel);
       if (!hasModel) {
         els.confGrid.innerHTML = "";
+        els.confGrid.hidden = true;
+        els.confGrid.removeAttribute("data-count");
         classConfValues = [];
-        els.rerunBtn.disabled = true;
+        if (els.imgszCtrl) els.imgszCtrl.hidden = true;
         return;
       }
+      els.confGrid.hidden = false;
       const isPt = m.kind === "pt";
       if (els.imgszCtrl) els.imgszCtrl.hidden = !isPt;
       if (isPt) {
@@ -744,16 +945,10 @@
         els.imgszOut.textContent = String(imgsz);
       }
       buildClassConfSliders(m.class_names, m.default_confs);
-      els.rerunBtn.disabled = !selectedFile;
     }
 
     function canRun() {
       return !!(selectedFile && els.select.value);
-    }
-
-    function canApplyRerun() {
-      const m = selectedModel();
-      return !!(selectedFile && m && (m.kind === "pt" || m.kind === "miner"));
     }
 
     function updateMeta() {
@@ -762,6 +957,7 @@
         els.meta.textContent = "No models found";
         els.modelActions.style.display = "none";
         syncPtControls(null);
+        loadHistory();
         return;
       }
       const badges =
@@ -776,6 +972,7 @@
         `<div>${m.path}</div>`;
       els.modelActions.style.display = m.uploaded ? "flex" : "none";
       syncPtControls(m);
+      loadHistory();
     }
 
     async function loadModels(selectId) {
@@ -832,8 +1029,6 @@
       selectedFile = file;
       lastResult = null;
       els.run.disabled = !els.select.value;
-      els.clear.disabled = false;
-      els.rerunBtn.disabled = !canApplyRerun();
       els.stats.innerHTML = "";
       const url = URL.createObjectURL(file);
       showCanvasMedia(`<img src="${url}" alt="input" />`);
@@ -843,25 +1038,22 @@
 
     function renderResult(data) {
       lastResult = data;
+      rememberResult(data);
+      activeResultId = data.result_id || data.id || activeResultId;
       const showOrig = els.showOriginal.checked;
-      const b64 = showOrig ? data.original_b64 : data.image_b64;
-      showCanvasMedia(`<img src="data:image/jpeg;base64,${b64}" alt="result" />`);
+      const src = resultImageSrc(data, showOrig);
+      if (src) {
+        showCanvasMedia(`<img src="${src}" alt="result" decoding="async" />`);
+      }
 
-      const extra = [];
-      if (Array.isArray(data.confs)) {
+      const confBits = [];
+      if (Array.isArray(data.confs) && data.confs.length) {
         data.confs.forEach((c, i) => {
           const name = (data.class_names && data.class_names[i]) || `c${i}`;
-          extra.push(`<span class="pill">${name} <strong>≥${Number(c).toFixed(2)}</strong></span>`);
+          confBits.push(`<span class="pill">${name} <strong>≥${Number(c).toFixed(2)}</strong></span>`);
         });
       } else if (data.conf != null) {
-        extra.push(`<span class="pill">conf <strong>${data.conf}</strong></span>`);
-      }
-      if (data.kind === "pt" && data.imgsz != null) {
-        extra.push(`<span class="pill">imgsz <strong>${data.imgsz}</strong></span>`);
-      }
-      if (data.device) extra.push(`<span class="pill">device <strong>${data.device}</strong></span>`);
-      if (data.device_mode && data.device_mode !== data.device) {
-        extra.push(`<span class="pill">mode <strong>${data.device_mode}</strong></span>`);
+        confBits.push(`<span class="pill">conf <strong>≥${Number(data.conf).toFixed(2)}</strong></span>`);
       }
       const countBits = Object.entries(data.counts || {})
         .map(([k, v]) => `<span class="pill">${k} <strong>${v}</strong></span>`)
@@ -869,44 +1061,143 @@
       els.stats.innerHTML =
         `<span class="pill">boxes <strong>${data.num_detections}</strong></span>` +
         `<span class="pill">infer <strong>${data.inference_ms} ms</strong></span>` +
-        (data.load_ms > 5 ? `<span class="pill">load <strong>${data.load_ms} ms</strong></span>` : "") +
-        `<span class="pill">${data.width}×${data.height}</span>` +
-        extra.join("") +
+        confBits.join("") +
         countBits;
 
-      if (!data.detections.length) {
+      if (!data.detections || !data.detections.length) {
         els.detList.innerHTML = `<div class="empty-hint" style="padding:1rem">No detections</div>`;
+      } else {
+        els.detList.innerHTML = data.detections
+          .slice()
+          .sort((a, b) => b.conf - a.conf)
+          .map((d) => {
+            const idx = (data.class_names || []).indexOf(d.class);
+            const c = classColor(d.class, idx >= 0 ? idx : (d.cls_id || 0));
+            const [x1, y1, x2, y2] = d.bbox;
+            return `<div class="det">
+              <i class="swatch" style="background:${c};margin-top:4px"></i>
+              <div>
+                <div class="name">${d.class}</div>
+                <div class="bbox">${x1},${y1} → ${x2},${y2}</div>
+              </div>
+              <div class="conf">${d.conf.toFixed(3)}</div>
+            </div>`;
+          })
+          .join("");
+      }
+      highlightActiveHistory();
+    }
+
+    function highlightActiveHistory() {
+      if (!els.historyList) return;
+      els.historyList.querySelectorAll(".history-card").forEach((card) => {
+        card.classList.toggle("active", card.dataset.id === activeResultId);
+      });
+    }
+
+    function renderHistoryList() {
+      const m = selectedModel();
+      if (!m) {
+        els.historyMeta.textContent = "No model selected";
+      } else {
+        els.historyMeta.innerHTML =
+          `<div><b>${m.name}</b> · ${historyItems.length} saved</div>` +
+          `<div>${m.kind} · ${m.group}</div>`;
+      }
+      if (!historyItems.length) {
+        els.historyList.innerHTML =
+          `<div class="empty-hint" style="padding:0.5rem 0">Run detection to save results for this model</div>`;
         return;
       }
-      els.detList.innerHTML = data.detections
-        .slice()
-        .sort((a, b) => b.conf - a.conf)
-        .map((d) => {
-          const idx = (data.class_names || []).indexOf(d.class);
-          const c = classColor(d.class, idx >= 0 ? idx : (d.cls_id || 0));
-          const [x1, y1, x2, y2] = d.bbox;
-          return `<div class="det">
-            <i class="swatch" style="background:${c};margin-top:4px"></i>
-            <div>
-              <div class="name">${d.class}</div>
-              <div class="bbox">${x1},${y1} → ${x2},${y2}</div>
-            </div>
-            <div class="conf">${d.conf.toFixed(3)}</div>
-          </div>`;
-        })
-        .join("");
+      els.historyList.innerHTML = historyItems.map((item) => {
+        const when = item.created_at
+          ? new Date(item.created_at * 1000).toLocaleString()
+          : "";
+        const active = item.id === activeResultId ? " active" : "";
+        const counts = Object.entries(item.counts || {})
+          .map(([k, v]) => `${k} ${v}`)
+          .join(" · ");
+        return `<button type="button" class="history-card${active}" data-id="${item.id}">
+          <div class="history-canvas">
+            <img src="${item.preview_url}" alt="${item.filename || "result"}" loading="lazy" />
+          </div>
+          <div class="model-meta">
+            <div><b>${item.filename || "image"}</b></div>
+            <div>${item.num_detections || 0} boxes · ${item.inference_ms ?? "—"} ms${item.device ? ` · ${item.device}` : ""}</div>
+            <div>${item.width || "?"}×${item.height || "?"}${counts ? ` · ${counts}` : ""}</div>
+            <div>${when}</div>
+          </div>
+        </button>`;
+      }).join("");
+      els.historyList.querySelectorAll(".history-card").forEach((card) => {
+        card.addEventListener("click", () => openHistoryResult(card.dataset.id));
+      });
+    }
+
+    async function loadHistory() {
+      const modelId = els.select.value;
+      if (!modelId) {
+        historyItems = [];
+        activeResultId = null;
+        renderHistoryList();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/results?model_id=${encodeURIComponent(modelId)}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(detailMessage(data.detail) || res.statusText);
+        historyItems = data.results || [];
+        renderHistoryList();
+      } catch (e) {
+        historyItems = [];
+        renderHistoryList();
+        console.warn("history load failed", e);
+      }
+    }
+
+    async function openHistoryResult(resultId) {
+      const modelId = els.select.value;
+      if (!modelId || !resultId) return;
+      const cached = resultMemCache.get(resultId);
+      if (cached) {
+        activeResultId = resultId;
+        renderResult(cached);
+        setStatus(`Cached result — ${cached.num_detections} boxes`);
+        return;
+      }
+      setStatus("Loading saved result…", "busy");
+      try {
+        const res = await fetch(
+          `/api/results/${encodeURIComponent(resultId)}?model_id=${encodeURIComponent(modelId)}`
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(detailMessage(data.detail) || res.statusText);
+        data.result_id = resultId;
+        data.from_cache = true;
+        activeResultId = resultId;
+        // Prefetch full images into browser cache while rendering meta
+        if (data.image_url) {
+          const img = new Image();
+          img.decoding = "async";
+          img.src = data.image_url;
+        }
+        renderResult(data);
+        setStatus(`Cached result — ${data.num_detections} boxes`);
+      } catch (e) {
+        setStatus(String(e.message || e), "error");
+      }
     }
 
     async function run() {
       if (!canRun()) return;
       const m = selectedModel();
       els.run.disabled = true;
-      els.rerunBtn.disabled = true;
-      setStatus("Running inference (first load may take a while)…", "busy");
+      setStatus("Running detection…", "busy");
       const fd = new FormData();
       fd.append("model_id", els.select.value);
       fd.append("file", selectedFile, selectedFile.name);
       fd.append("device", selectedDevice());
+      // Always send current control-panel settings so threshold/imgsz changes apply.
       if (m && (m.kind === "pt" || m.kind === "miner")) {
         const confs = readClassConfs();
         if (confs.length) {
@@ -921,13 +1212,15 @@
         const res = await fetch("/api/predict", { method: "POST", body: fd });
         const data = await res.json();
         if (!res.ok) throw new Error(detailMessage(data.detail) || res.statusText);
+        if (data.result_id) activeResultId = data.result_id;
         renderResult(data);
-        setStatus(`Done — ${data.num_detections} boxes`);
+        await loadHistory();
+        const tag = data.from_cache ? "cached" : "inferred";
+        setStatus(`Done (${tag}) — ${data.num_detections} boxes`);
       } catch (e) {
         setStatus(String(e.message || e), "error");
       } finally {
         els.run.disabled = !canRun();
-        els.rerunBtn.disabled = !canApplyRerun();
       }
     }
 
@@ -1034,11 +1327,10 @@
       els.canvas.classList.remove("dragover");
       setFile(e.dataTransfer.files[0]);
     });
-    els.run.addEventListener("click", run);
-    els.rerunBtn.addEventListener("click", run);
+    els.run.addEventListener("click", () => run());
     document.addEventListener("keydown", (e) => {
       if (e.code !== "Space" && e.key !== " ") return;
-      if (!(e.ctrlKey || e.metaKey)) return;
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
       const t = e.target;
       if (t) {
         const tag = (t.tagName || "").toUpperCase();
@@ -1048,22 +1340,7 @@
         }
       }
       e.preventDefault();
-      if (e.altKey) {
-        if (canApplyRerun() && !els.rerunBtn.disabled) run();
-      } else if (canRun() && !els.run.disabled) {
-        run();
-      }
-    });
-    els.clear.addEventListener("click", () => {
-      selectedFile = null;
-      lastResult = null;
-      els.run.disabled = true;
-      els.clear.disabled = true;
-      els.rerunBtn.disabled = true;
-      resetCanvas();
-      els.detList.innerHTML = `<div class="empty-hint" style="padding:1rem">No results yet</div>`;
-      els.stats.innerHTML = "";
-      setStatus("");
+      if (canRun() && !els.run.disabled) run();
     });
     els.showOriginal.addEventListener("change", () => {
       if (lastResult) renderResult(lastResult);

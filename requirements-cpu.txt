@@ -1,0 +1,3 @@
+# CPU / macOS install (no CUDA). Use instead of requirements.txt on machines without NVIDIA GPU.
+-r requirements-base.txt
+onnxruntime>=1.16

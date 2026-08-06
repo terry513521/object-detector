@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Object Detector viewer: miner+ONNX or Ultralytics .pt, drop an image, see boxes."""
+"""Object Detector viewer: miner+ONNX or Ultralytics .pt, drop an image, see boxes.
+
+Cross-platform (Linux / macOS / Windows). Paths are project-relative; optional
+workspace scanning for sibling model trees. GPU (CUDA) and CPU modes both
+supported; CoreML EP is used on macOS when available.
+"""
 
 from __future__ import annotations
 
-import base64
 import ast
+import base64
+import hashlib
 import importlib.util
+import json
 import os
+import platform
 import re
 import shutil
+import sys
 import threading
 import time
 import traceback
@@ -25,33 +34,82 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 HERE = Path(__file__).resolve().parent
-CAR_WASH = HERE.parent
 STATIC = HERE / "static"
 UPLOADS = HERE / "uploads"
 UPLOADS.mkdir(parents=True, exist_ok=True)
+RESULTS = HERE / "cache" / "results"
+RESULTS.mkdir(parents=True, exist_ok=True)
+
+
+def _default_id_root() -> Path:
+    """Project root for model IDs. Use parent when sibling model trees exist."""
+    env = os.environ.get("DETECTOR_ROOT", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    parent = HERE.parent
+    if any((parent / name).is_dir() for name in ("layer", "full")):
+        return parent.resolve()
+    return HERE.resolve()
+
+
+ID_ROOT = _default_id_root()
+# Back-compat alias used throughout older code / docs.
+CAR_WASH = ID_ROOT
 
 # Default inference device: auto | cpu | cuda (gpu/0 accepted as cuda aliases).
-# Per-request Form field `device` overrides this without removing GPU support.
 DEFAULT_DEVICE_MODE = os.environ.get("DETECTOR_DEVICE", "auto")
 
-# Roots to scan for (miner.py + *.onnx) pairs.
-SCAN_ROOTS = [
-    UPLOADS,
-    CAR_WASH / "layer" / "models",
-    CAR_WASH / "layer" / "_cand",
-    CAR_WASH / "layer" / "exports",
-    CAR_WASH / "full" / "exports",
-]
 
-# Extra single .pt files / dirs to surface (avoid every epoch checkpoint).
-PT_EXTRA_FILES = [
-    CAR_WASH / "full" / "best.pt",
-]
-PT_DIR_GLOBS = [
-    (CAR_WASH / "full" / "exports", ("best.pt", "best_tw.pt", "last.pt", "weights.pt", "model.pt")),
-    (CAR_WASH / "layer" / "exports", ("best.pt", "best_tw.pt", "last.pt", "weights.pt", "model.pt")),
-    (CAR_WASH / "full" / "runs", ("best.pt", "best_tw.pt")),
-]
+def _build_scan_layout() -> tuple[list[Path], list[Path], list[tuple[Path, tuple[str, ...]]]]:
+    """Discover model scan roots relative to ID_ROOT / env (cross-platform)."""
+    roots: list[Path] = [UPLOADS]
+    extra = os.environ.get("DETECTOR_SCAN_ROOTS", "")
+    for part in extra.split(os.pathsep):
+        part = part.strip()
+        if part:
+            roots.append(Path(part).expanduser().resolve())
+
+    # Optional sibling / workspace layout (car-wash style), only if present.
+    for rel in (
+        ("layer", "models"),
+        ("layer", "_cand"),
+        ("layer", "exports"),
+        ("full", "exports"),
+    ):
+        p = ID_ROOT.joinpath(*rel)
+        if p.is_dir():
+            roots.append(p)
+
+    pt_files: list[Path] = []
+    best = ID_ROOT / "full" / "best.pt"
+    if best.is_file():
+        pt_files.append(best)
+
+    pt_globs: list[tuple[Path, tuple[str, ...]]] = []
+    for base, names in (
+        (ID_ROOT / "full" / "exports", ("best.pt", "best_tw.pt", "last.pt", "weights.pt", "model.pt")),
+        (ID_ROOT / "layer" / "exports", ("best.pt", "best_tw.pt", "last.pt", "weights.pt", "model.pt")),
+        (ID_ROOT / "full" / "runs", ("best.pt", "best_tw.pt")),
+    ):
+        if base.is_dir():
+            pt_globs.append((base, names))
+
+    # Deduplicate roots while preserving order
+    seen: set[Path] = set()
+    uniq: list[Path] = []
+    for r in roots:
+        try:
+            key = r.resolve()
+        except OSError:
+            key = r
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(r)
+    return uniq, pt_files, pt_globs
+
+
+SCAN_ROOTS, PT_EXTRA_FILES, PT_DIR_GLOBS = _build_scan_layout()
 
 CLASS_COLORS = {
     "broom": (46, 196, 182),
@@ -102,7 +160,7 @@ _runtime_ready = False
 
 
 def cuda_available() -> bool:
-    """True only when a usable CUDA device is present (not merely ORT listing the EP)."""
+    """True only when a usable CUDA device is present (Linux/Windows/macOS-safe)."""
     try:
         import torch
 
@@ -110,8 +168,10 @@ def cuda_available() -> bool:
             return True
     except Exception:
         pass
-    # Fallback device-node check for hosts without a working torch CUDA build
-    return Path("/dev/nvidia0").exists()
+    # Linux device node (works even if torch is CPU-only build)
+    if sys.platform.startswith("linux") and Path("/dev/nvidia0").exists():
+        return True
+    return False
 
 
 def normalize_device_mode(raw: str | None = None) -> str:
@@ -168,16 +228,18 @@ def ensure_runtime_ready() -> None:
 
             so = ort.SessionOptions()
             so.log_severity_level = 3
-            # Tiny no-op: just force EP libs to load if CUDA is listed
             print("ORT providers:", ort.get_available_providers())
-            print(f"DETECTOR_DEVICE={mode} cuda_available={cuda_available()}")
+            print(
+                f"platform={platform.system()} DETECTOR_DEVICE={mode} "
+                f"cuda_available={cuda_available()} id_root={ID_ROOT}"
+            )
         except Exception as e:
             print(f"ORT warm-up skipped: {e}")
         _runtime_ready = True
 
 
 def _ort_providers(mode: str | None = None) -> list[str]:
-    """Pick ORT EPs. GPU mode prefers CUDA; CPU mode forces CPU only."""
+    """Pick ORT EPs for the current OS. GPU mode prefers CUDA; auto may use CoreML on macOS."""
     try:
         import onnxruntime as ort
 
@@ -200,10 +262,12 @@ def _ort_providers(mode: str | None = None) -> list[str]:
         if "CPUExecutionProvider" in available:
             order.append("CPUExecutionProvider")
         return order
-    # auto: use CUDA only when a real GPU is present; always keep CPU fallback
+    # auto: CUDA when real GPU present; CoreML on macOS; always keep CPU fallback
     order = []
     if cuda_available() and "CUDAExecutionProvider" in available:
         order.append("CUDAExecutionProvider")
+    if sys.platform == "darwin" and "CoreMLExecutionProvider" in available:
+        order.append("CoreMLExecutionProvider")
     if "CPUExecutionProvider" in available:
         order.append("CPUExecutionProvider")
     return order or ["CPUExecutionProvider"]
@@ -273,15 +337,33 @@ def _is_pt_folder(folder: Path) -> bool:
     return _find_pt(folder) is not None and not _is_miner_model(folder)
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    """True if path is root or a descendant (Windows-safe; no string prefix tricks)."""
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def _model_id_for(path: Path) -> str:
-    return str(path.resolve().relative_to(CAR_WASH.resolve())).replace("\\", "/")
+    resolved = path.resolve()
+    for root in (ID_ROOT, HERE):
+        try:
+            return str(resolved.relative_to(root.resolve())).replace("\\", "/")
+        except ValueError:
+            continue
+    raise HTTPException(400, f"Path outside project roots: {path}")
 
 
 def _group_for(path: Path) -> str:
     resolved = path.resolve()
     if UPLOADS.resolve() == resolved or UPLOADS.resolve() in resolved.parents:
         return "uploads"
-    rel = resolved.relative_to(CAR_WASH.resolve())
+    try:
+        rel = resolved.relative_to(ID_ROOT.resolve())
+    except ValueError:
+        rel = resolved.relative_to(HERE.resolve())
     if len(rel.parts) >= 2:
         return f"{rel.parts[0]}/{rel.parts[1]}"
     return rel.parts[0]
@@ -362,8 +444,27 @@ def _pt_meta(path: Path) -> tuple[int, list[str], list[float]]:
     return imgsz, names, confs
 
 
+def _extract_py_list(src: str, *patterns: str) -> list[Any] | None:
+    """Find the first assignable Python list literal matching any pattern."""
+    for pat in patterns:
+        m = re.search(pat, src, flags=re.MULTILINE)
+        if not m:
+            continue
+        try:
+            parsed = ast.literal_eval(m.group(1))
+        except Exception:
+            continue
+        if isinstance(parsed, (list, tuple)) and parsed:
+            return list(parsed)
+    return None
+
+
 def _miner_meta(folder: Path) -> tuple[list[str], list[float]]:
-    """Read class_names + per-class conf thresholds from miner.py (no ONNX load)."""
+    """Read class_names + per-class conf thresholds from miner.py (no ONNX load).
+
+    Supports both instance attrs (`self.class_names = [...]`) and class attrs
+    (`class_names = [...]`), including multiline np.array([...]) assignments.
+    """
     path = folder / "miner.py"
     key = str(path.resolve())
     try:
@@ -374,35 +475,38 @@ def _miner_meta(folder: Path) -> tuple[list[str], list[float]]:
     if cached and cached[0] == mtime:
         return cached[1], cached[2]
 
-    names = list(FALLBACK_NAMES)
-    confs = _default_confs_for(names)
+    names: list[str] = []
+    confs: list[float] = []
     try:
         src = path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         _miner_meta_cache[key] = (mtime, names, confs)
         return names, confs
 
-    m_names = re.search(r"self\.class_names\s*=\s*(\[[^\]]*\])", src)
-    if m_names:
-        try:
-            parsed = ast.literal_eval(m_names.group(1))
-            if isinstance(parsed, (list, tuple)) and parsed:
-                names = [str(x) for x in parsed]
-                confs = _default_confs_for(names)
-        except Exception:
-            pass
-
-    m_conf = re.search(
-        r"self\._conf_thres_array\s*=\s*np\.array\s*\(\s*(\[[^\]]*\])",
+    # Prefer self.* (instance) then bare class-level attributes.
+    raw_names = _extract_py_list(
         src,
+        r"self\.class_names\s*=\s*(\[[^\]]*\])",
+        r"(?m)^\s*class_names\s*=\s*(\[[^\]]*\])",
     )
-    if m_conf:
+    if raw_names:
+        names = [str(x) for x in raw_names]
+
+    raw_confs = _extract_py_list(
+        src,
+        r"self\._conf_thres_array\s*=\s*np\.array\s*\(\s*(\[[^\]]*\])",
+        r"(?m)^\s*_conf_thres_array\s*=\s*np\.array\s*\(\s*(\[[^\]]*\])",
+    )
+    if raw_confs:
         try:
-            parsed = ast.literal_eval(m_conf.group(1))
-            if isinstance(parsed, (list, tuple)) and parsed:
-                confs = [float(x) for x in parsed]
+            confs = [float(x) for x in raw_confs]
         except Exception:
-            pass
+            confs = []
+
+    if names and not confs:
+        confs = _default_confs_for(names)
+    if not names and confs:
+        names = [f"class {i}" for i in range(len(confs))]
 
     if len(confs) < len(names):
         confs = confs + [0.25] * (len(names) - len(confs))
@@ -443,8 +547,7 @@ def _append_pt(models: list[ModelInfo], seen: set[Path], pt: Path, name: str | N
     resolved = pt.resolve()
     if resolved in seen or not pt.is_file():
         return
-    root = CAR_WASH.resolve()
-    if not str(resolved).startswith(str(root)):
+    if not (_is_under(resolved, ID_ROOT) or _is_under(resolved, HERE)):
         return
     seen.add(resolved)
     group = _group_for(pt)
@@ -520,10 +623,16 @@ def discover_models() -> list[ModelInfo]:
 
 
 def _resolve_model(model_id: str) -> tuple[str, Path]:
-    path = (CAR_WASH / model_id).resolve()
-    root = CAR_WASH.resolve()
-    if not str(path).startswith(str(root)):
-        raise HTTPException(400, "Invalid model path")
+    mid = model_id.replace("\\", "/").lstrip("/")
+    candidates = [(ID_ROOT / mid).resolve(), (HERE / mid).resolve()]
+    path = None
+    for cand in candidates:
+        if _is_under(cand, ID_ROOT) or _is_under(cand, HERE):
+            if cand.exists():
+                path = cand
+                break
+    if path is None:
+        raise HTTPException(404, f"Unknown model: {model_id}")
     if path.is_file() and path.suffix.lower() == ".pt":
         return "pt", path
     if path.is_dir() and _is_miner_model(path):
@@ -758,14 +867,228 @@ def parse_confs_form(confs_raw: str | None, conf: float, n_hint: int = 4) -> lis
     """Parse confs JSON array from form; None means use single conf."""
     if confs_raw:
         try:
-            import json
-
             data = json.loads(confs_raw)
             if isinstance(data, list) and data:
                 return [float(x) for x in data]
         except Exception:
             pass
     return None
+
+
+def _model_cache_dir(model_id: str) -> Path:
+    digest = hashlib.sha1(model_id.encode("utf-8")).hexdigest()[:20]
+    path = (RESULTS / digest).resolve()
+    if not _is_under(path, RESULTS):
+        raise HTTPException(400, "Invalid model cache path")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _image_hash(raw: bytes) -> str:
+    return hashlib.sha1(raw).hexdigest()
+
+
+def _settings_key(
+    device_mode: str | None,
+    confs: list[float] | None,
+    imgsz: int | None,
+) -> str:
+    payload = {
+        "device": normalize_device_mode(device_mode),
+        "confs": [round(float(c), 4) for c in (confs or [])],
+        "imgsz": int(imgsz) if imgsz is not None else None,
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _result_id(image_hash: str, settings_key: str) -> str:
+    return f"{image_hash[:24]}_{settings_key}"
+
+
+def _result_dir(model_id: str, result_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f_]{8,80}", result_id):
+        raise HTTPException(400, "Invalid result id")
+    root = _model_cache_dir(model_id)
+    path = (root / result_id).resolve()
+    if not _is_under(path, root):
+        raise HTTPException(400, "Invalid result path")
+    return path
+
+
+def _write_jpeg(path: Path, image_bgr: np.ndarray, quality: int = 90) -> None:
+    ok, buf = cv2.imencode(".jpg", image_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        raise RuntimeError("JPEG encode failed")
+    path.write_bytes(buf.tobytes())
+
+
+def _write_thumb(annotated_bgr: np.ndarray, path: Path, max_w: int = 480) -> None:
+    h, w = annotated_bgr.shape[:2]
+    if w > max_w:
+        scale = max_w / float(w)
+        annotated_bgr = cv2.resize(
+            annotated_bgr,
+            (max_w, max(1, int(round(h * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    _write_jpeg(path, annotated_bgr, quality=70)
+
+
+def _result_urls(model_id: str, result_id: str) -> dict[str, str]:
+    q = f"model_id={model_id}"
+    return {
+        "image_url": f"/api/results/{result_id}/annotated?{q}",
+        "original_url": f"/api/results/{result_id}/original?{q}",
+        "preview_url": f"/api/results/{result_id}/preview?{q}",
+    }
+
+
+def _cached_file_response(path: Path) -> FileResponse:
+    if not path.is_file():
+        raise HTTPException(404, "Image not found")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+        },
+    )
+
+
+def save_result(
+    *,
+    model_id: str,
+    filename: str,
+    image_hash: str,
+    settings_key: str,
+    image_bgr: np.ndarray,
+    annotated_bgr: np.ndarray,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    rid = _result_id(image_hash, settings_key)
+    dest = _result_dir(model_id, rid)
+    dest.mkdir(parents=True, exist_ok=True)
+    _write_jpeg(dest / "original.jpg", image_bgr, quality=82)
+    _write_jpeg(dest / "annotated.jpg", annotated_bgr, quality=85)
+    _write_thumb(annotated_bgr, dest / "thumb.jpg")
+    meta = {
+        "id": rid,
+        "model_id": model_id,
+        "filename": filename or "image.jpg",
+        "image_hash": image_hash,
+        "settings_key": settings_key,
+        "created_at": time.time(),
+        "kind": payload.get("kind"),
+        "width": payload.get("width"),
+        "height": payload.get("height"),
+        "inference_ms": payload.get("inference_ms"),
+        "load_ms": payload.get("load_ms"),
+        "num_detections": payload.get("num_detections"),
+        "counts": payload.get("counts") or {},
+        "class_names": payload.get("class_names") or [],
+        "detections": payload.get("detections") or [],
+        "conf": payload.get("conf"),
+        "confs": payload.get("confs"),
+        "imgsz": payload.get("imgsz"),
+        "device": payload.get("device"),
+        "device_mode": payload.get("device_mode"),
+        "cached": True,
+    }
+    (dest / "meta.json").write_text(json.dumps(meta, separators=(",", ":")), encoding="utf-8")
+    return meta
+
+
+def load_result_meta(model_id: str, result_id: str) -> dict[str, Any]:
+    dest = _result_dir(model_id, result_id)
+    meta_path = dest / "meta.json"
+    if not meta_path.is_file():
+        raise HTTPException(404, "Result not found")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"Corrupt result meta: {e}") from e
+    meta["id"] = result_id
+    meta["model_id"] = model_id
+    return meta
+
+
+def result_payload_fast(model_id: str, result_id: str) -> dict[str, Any]:
+    """Meta + image URLs only (no base64) for fast cached loads."""
+    dest = _result_dir(model_id, result_id)
+    if not (dest / "meta.json").is_file():
+        raise HTTPException(404, "Result not found")
+    if not (dest / "annotated.jpg").is_file() or not (dest / "original.jpg").is_file():
+        raise HTTPException(404, "Result images missing")
+    # Backfill thumb for older cache entries
+    thumb = dest / "thumb.jpg"
+    if not thumb.is_file():
+        try:
+            ann = cv2.imread(str(dest / "annotated.jpg"))
+            if ann is not None:
+                _write_thumb(ann, thumb)
+        except Exception:
+            pass
+    meta = dict(load_result_meta(model_id, result_id))
+    meta.update(_result_urls(model_id, result_id))
+    meta["result_id"] = result_id
+    meta["from_cache"] = True
+    return meta
+
+
+def find_cached_result(
+    model_id: str,
+    image_hash: str,
+    settings_key: str,
+) -> dict[str, Any] | None:
+    rid = _result_id(image_hash, settings_key)
+    dest = _result_dir(model_id, rid)
+    if not (dest / "meta.json").is_file():
+        return None
+    try:
+        return result_payload_fast(model_id, rid)
+    except HTTPException:
+        return None
+
+
+def list_results_for_model(model_id: str) -> list[dict[str, Any]]:
+    root = _model_cache_dir(model_id)
+    items: list[dict[str, Any]] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        meta_path = child / "meta.json"
+        if not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        rid = child.name
+        # Lazy thumb for old entries
+        if not (child / "thumb.jpg").is_file() and (child / "annotated.jpg").is_file():
+            try:
+                ann = cv2.imread(str(child / "annotated.jpg"))
+                if ann is not None:
+                    _write_thumb(ann, child / "thumb.jpg")
+            except Exception:
+                pass
+        items.append(
+            {
+                "id": rid,
+                "model_id": model_id,
+                "filename": meta.get("filename") or "image.jpg",
+                "created_at": meta.get("created_at") or 0,
+                "num_detections": meta.get("num_detections") or 0,
+                "counts": meta.get("counts") or {},
+                "inference_ms": meta.get("inference_ms"),
+                "device": meta.get("device"),
+                "width": meta.get("width"),
+                "height": meta.get("height"),
+                "preview_url": f"/api/results/{rid}/preview?model_id={model_id}",
+            }
+        )
+    items.sort(key=lambda x: float(x.get("created_at") or 0), reverse=True)
+    return items
 
 
 @app.post("/api/predict")
@@ -776,6 +1099,7 @@ async def api_predict(
     imgsz: int = Form(640),
     confs: str = Form(""),
     device: str = Form(""),
+    force: str = Form("false"),
 ):
     raw = await file.read()
     if not raw:
@@ -785,7 +1109,22 @@ async def api_predict(
     if image is None:
         raise HTTPException(400, "Could not decode image")
 
+    force_run = str(force).strip().lower() in ("1", "true", "yes", "on")
     device_mode = device.strip() or None
+    conf_list = parse_confs_form(confs, conf, 4)
+    # imgsz only matters for .pt; include requested value in cache key always
+    settings_key = _settings_key(device_mode, conf_list, imgsz)
+    image_hash = _image_hash(raw)
+    filename = Path(file.filename or "image.jpg").name
+
+    if not force_run:
+        cached = find_cached_result(model_id, image_hash, settings_key)
+        if cached is not None:
+            cached["from_cache"] = True
+            cached["load_ms"] = 0
+            cached["result_id"] = cached.get("id")
+            return cached
+
     t_load0 = time.perf_counter()
     try:
         entry = load_model(model_id, device_mode=device_mode)
@@ -799,7 +1138,7 @@ async def api_predict(
 
     t0 = time.perf_counter()
     try:
-        conf_list = parse_confs_form(confs, conf, len(names))
+        conf_list = parse_confs_form(confs, conf, len(names)) or conf_list
         if entry["kind"] == "miner":
             boxes, used_confs = predict_miner(
                 entry, image, conf=conf, confs=conf_list,
@@ -835,7 +1174,14 @@ async def api_predict(
     for d in detections:
         counts[d["class"]] = counts.get(d["class"], 0) + 1
 
-    return {
+    # Recompute settings key with resolved confs/imgsz so cache matches what was used
+    settings_key = _settings_key(
+        entry.get("device_mode") or device_mode,
+        used_confs,
+        used_imgsz if entry["kind"] == "pt" else imgsz,
+    )
+
+    payload = {
         "model_id": model_id,
         "kind": entry["kind"],
         "width": int(image.shape[1]),
@@ -851,9 +1197,65 @@ async def api_predict(
         "imgsz": used_imgsz,
         "device": device_label(str(entry.get("device") or "cpu")),
         "device_mode": entry.get("device_mode") or normalize_device_mode(device_mode),
-        "image_b64": encode_jpeg_b64(annotated),
-        "original_b64": encode_jpeg_b64(image, quality=85),
+        "from_cache": False,
     }
+    try:
+        meta = save_result(
+            model_id=model_id,
+            filename=filename,
+            image_hash=image_hash,
+            settings_key=settings_key,
+            image_bgr=image,
+            annotated_bgr=annotated,
+            payload=payload,
+        )
+        rid = meta["id"]
+        payload["result_id"] = rid
+        payload.update(_result_urls(model_id, rid))
+    except Exception as e:
+        print(f"result cache save skipped: {e}")
+        # Fallback when disk cache fails: inline images once
+        payload["image_b64"] = encode_jpeg_b64(annotated)
+        payload["original_b64"] = encode_jpeg_b64(image, quality=82)
+    return payload
+
+
+@app.get("/api/results")
+def api_list_results(model_id: str):
+    return {"model_id": model_id, "results": list_results_for_model(model_id)}
+
+
+@app.get("/api/results/{result_id}")
+def api_get_result(result_id: str, model_id: str):
+    return result_payload_fast(model_id, result_id)
+
+
+@app.get("/api/results/{result_id}/annotated")
+def api_result_annotated(result_id: str, model_id: str):
+    return _cached_file_response(_result_dir(model_id, result_id) / "annotated.jpg")
+
+
+@app.get("/api/results/{result_id}/original")
+def api_result_original(result_id: str, model_id: str):
+    return _cached_file_response(_result_dir(model_id, result_id) / "original.jpg")
+
+
+@app.get("/api/results/{result_id}/preview")
+def api_result_preview(result_id: str, model_id: str):
+    dest = _result_dir(model_id, result_id)
+    thumb = dest / "thumb.jpg"
+    if thumb.is_file():
+        return _cached_file_response(thumb)
+    return _cached_file_response(dest / "annotated.jpg")
+
+
+@app.delete("/api/results/{result_id}")
+def api_delete_result(result_id: str, model_id: str):
+    dest = _result_dir(model_id, result_id)
+    if not dest.exists():
+        raise HTTPException(404, "Result not found")
+    shutil.rmtree(dest)
+    return {"ok": True, "deleted": result_id}
 
 
 def draw_boxes(
@@ -919,7 +1321,7 @@ def _safe_extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
         if name.startswith("__MACOSX/") or name.endswith(".DS_Store"):
             continue
         target = (dest / name).resolve()
-        if not str(target).startswith(str(dest)):
+        if not _is_under(target, dest):
             raise HTTPException(400, f"Zip slip blocked: {info.filename}")
         target.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(info) as src, open(target, "wb") as out:
@@ -970,6 +1372,8 @@ def api_models():
             "default": normalize_device_mode(),
             "cuda_available": cuda_available(),
             "options": ["auto", "cpu", "cuda"],
+            "platform": platform.system(),
+            "machine": platform.machine(),
         },
     }
 
@@ -981,6 +1385,10 @@ def api_device():
         "cuda_available": cuda_available(),
         "resolved": device_label(resolve_torch_device()),
         "options": ["auto", "cpu", "cuda"],
+        "platform": platform.system(),
+        "machine": platform.machine(),
+        "python": sys.version.split()[0],
+        "id_root": str(ID_ROOT),
     }
 
 
@@ -1080,7 +1488,7 @@ async def api_upload_model(
 def api_delete_uploaded(model_name: str):
     model_name = _sanitize_name(model_name)
     dest = (UPLOADS / model_name).resolve()
-    if not str(dest).startswith(str(UPLOADS.resolve())):
+    if not _is_under(dest, UPLOADS):
         raise HTTPException(400, "Invalid name")
     if not dest.is_dir():
         raise HTTPException(404, f"Uploaded model not found: {model_name}")
