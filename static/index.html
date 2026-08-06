@@ -109,14 +109,6 @@
       word-break: break-all;
     }
 
-    .legend { display: grid; gap: 0.45rem; }
-    .legend span {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      font-size: 0.85rem;
-      color: var(--muted);
-    }
     .swatch {
       width: 12px;
       height: 12px;
@@ -140,10 +132,10 @@
       flex: 1;
     }
 
-    .drop, .model-drop {
+    .model-drop {
       border: 1.5px dashed var(--line);
-      border-radius: var(--radius);
-      background: var(--bg-elev);
+      border-radius: 8px;
+      background: var(--bg-panel);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -151,46 +143,36 @@
       cursor: pointer;
       transition: border-color 0.15s, background 0.15s;
       position: relative;
-    }
-    .drop {
-      min-height: 180px;
-      padding: 1.5rem;
-    }
-    .model-drop {
       min-height: 88px;
       padding: 0.85rem 0.75rem;
-      border-radius: 8px;
-      background: var(--bg-panel);
     }
-    .drop.dragover, .model-drop.dragover {
+    .model-drop.dragover, .canvas-wrap.dragover {
       border-color: var(--accent);
       background: var(--accent-dim);
     }
-    .drop input, .model-drop input {
+    .model-drop input {
       position: absolute;
       inset: 0;
       opacity: 0;
       cursor: pointer;
     }
-    .drop-inner strong, .model-drop-inner strong {
+    .model-drop-inner strong {
       display: block;
-      font-size: 1.05rem;
-      margin-bottom: 0.35rem;
+      font-size: 0.85rem;
+      margin-bottom: 0.25rem;
       color: var(--text);
       font-weight: 600;
       text-transform: none;
       letter-spacing: 0;
     }
-    .model-drop-inner strong { font-size: 0.85rem; margin-bottom: 0.25rem; }
-    .drop-inner span, .model-drop-inner span {
+    .model-drop-inner span {
       color: var(--muted);
-      font-size: 0.9rem;
+      font-size: 0.72rem;
       font-weight: 400;
       text-transform: none;
       letter-spacing: 0;
       line-height: 1.35;
     }
-    .model-drop-inner span { font-size: 0.72rem; }
 
     .toolbar {
       display: flex;
@@ -241,25 +223,59 @@
 
     .canvas-wrap {
       background: #0a0e12;
-      border: 1px solid var(--line);
+      border: 1.5px dashed var(--line);
       border-radius: var(--radius);
       display: flex;
       align-items: center;
       justify-content: center;
       overflow: hidden;
       min-height: 420px;
+      position: relative;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .canvas-wrap.has-media {
+      border-style: solid;
+      cursor: default;
+    }
+    .canvas-wrap > input[type="file"] {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+      z-index: 2;
+    }
+    .canvas-wrap.has-media > input[type="file"] {
+      display: none;
     }
     .canvas-wrap img {
       max-width: 100%;
       max-height: min(72vh, 820px);
       object-fit: contain;
       display: block;
+      position: relative;
+      z-index: 1;
+      pointer-events: none;
     }
     .empty-hint {
       color: var(--muted);
       font-size: 0.95rem;
       padding: 2rem;
       text-align: center;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .empty-hint strong {
+      display: block;
+      font-size: 1.05rem;
+      margin-bottom: 0.35rem;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .empty-hint span {
+      display: block;
+      font-size: 0.9rem;
+      line-height: 1.35;
     }
 
     .panel {
@@ -426,8 +442,25 @@
     .pt-bar .pt-note {
       font-size: 0.75rem;
       color: var(--muted);
-      max-width: 220px;
+      max-width: 260px;
       line-height: 1.35;
+    }
+    .pt-bar .pt-note kbd {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      padding: 0.1rem 0.35rem;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--bg-panel);
+      color: var(--text);
+    }
+    .pt-bar .imgsz-ctrl[hidden] { display: none; }
+    .btn .hotkey {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      font-weight: 500;
+      opacity: 0.75;
+      margin-left: 0.4rem;
     }
     .pt-bar .conf-grid {
       display: flex;
@@ -462,6 +495,15 @@
         <select id="modelSelect"></select>
       </label>
 
+      <label class="field">
+        Device
+        <select id="deviceSelect">
+          <option value="auto">Auto (GPU if available)</option>
+          <option value="cuda">GPU (CUDA)</option>
+          <option value="cpu">CPU</option>
+        </select>
+      </label>
+
       <div class="model-meta" id="modelMeta">Scanning models…</div>
 
       <div class="upload-actions" id="modelActions" style="display:none">
@@ -490,29 +532,14 @@
           Overwrite if exists
         </label>
         <button class="btn btn-primary" type="button" id="uploadBtn">Upload to server</button>
-        <p class="upload-hint">Saved under <code>viewer/uploads/</code>. .pt models unlock the conf / imgsz panel.</p>
-      </div>
-
-      <div class="legend" id="legend">
-        <span><i class="swatch" style="background:#2ec4b6"></i> broom</span>
-        <span><i class="swatch" style="background:#ff9f1c"></i> drainage gate</span>
-        <span><i class="swatch" style="background:#e74c3c"></i> nozzle</span>
-        <span><i class="swatch" style="background:#3498db"></i> track</span>
+        <p class="upload-hint">Saved under <code>viewer/uploads/</code>. Conf / imgsz panel works for .pt and miner+ONNX.</p>
       </div>
     </aside>
 
     <div class="main-col">
       <main>
-        <div class="drop" id="dropzone">
-          <input type="file" id="fileInput" accept="image/*" />
-          <div class="drop-inner">
-            <strong>Drop an image here</strong>
-            <span>or click to browse · JPG / PNG / WEBP</span>
-          </div>
-        </div>
-
         <div class="toolbar">
-          <button class="btn btn-primary" id="runBtn" disabled>Run detection</button>
+          <button class="btn btn-primary" id="runBtn" disabled>Run detection<span class="hotkey">Ctrl+Space</span></button>
           <button class="btn btn-ghost" id="clearBtn" disabled>Clear</button>
           <label class="toggle-row">
             <input type="checkbox" id="showOriginal" />
@@ -525,7 +552,11 @@
 
         <div class="stage">
           <div class="canvas-wrap" id="canvas">
-            <div class="empty-hint">Prediction will appear here</div>
+            <input type="file" id="fileInput" accept="image/*" />
+            <div class="empty-hint">
+              <strong>Drop an image here</strong>
+              <span>or click to browse · JPG / PNG / WEBP</span>
+            </div>
           </div>
           <div class="panel">
             <h2>Detections</h2>
@@ -538,28 +569,34 @@
 
       <div class="pt-bar" id="ptBar">
         <div class="conf-grid" id="confGrid"></div>
-        <div class="ctrl">
+        <div class="ctrl imgsz-ctrl" id="imgszCtrl">
           <label>Image size <output id="imgszOut">640</output></label>
           <input type="range" id="imgszSlider" min="320" max="1280" step="32" value="640" />
         </div>
-        <button class="btn btn-primary" type="button" id="rerunBtn" disabled>Apply &amp; re-run</button>
-        <p class="pt-note">Per-class confidence + imgsz for Ultralytics <b>.pt</b> only. Miner/ONNX keeps its own thresholds.</p>
+        <button class="btn btn-primary" type="button" id="rerunBtn" disabled>Apply &amp; re-run<span class="hotkey">Ctrl+Alt+Space</span></button>
+        <p class="pt-note">Per-class confidence for <b>.pt</b> and <b>miner+ONNX</b>. Miner defaults come from <code>miner.py</code>. Image size is Ultralytics .pt only.</p>
       </div>
     </div>
   </div>
 
   <script>
-    const COLORS = {
+    const COLOR_BY_NAME = {
       "broom": "#2ec4b6",
       "drainage gate": "#ff9f1c",
+      "drainage_gate": "#ff9f1c",
       "nozzle": "#e74c3c",
       "track": "#3498db",
     };
+    const COLOR_PALETTE = [
+      "#2ec4b6", "#ff9f1c", "#e74c3c", "#3498db",
+      "#9b59b6", "#2ecc71", "#f1c40f", "#e67e22",
+      "#1abc9c", "#34495e", "#95a5a6", "#c0392b",
+    ];
 
     const els = {
       select: document.getElementById("modelSelect"),
+      deviceSelect: document.getElementById("deviceSelect"),
       meta: document.getElementById("modelMeta"),
-      drop: document.getElementById("dropzone"),
       file: document.getElementById("fileInput"),
       run: document.getElementById("runBtn"),
       clear: document.getElementById("clearBtn"),
@@ -580,6 +617,7 @@
       confGrid: document.getElementById("confGrid"),
       imgszSlider: document.getElementById("imgszSlider"),
       imgszOut: document.getElementById("imgszOut"),
+      imgszCtrl: document.getElementById("imgszCtrl"),
       rerunBtn: document.getElementById("rerunBtn"),
     };
 
@@ -588,14 +626,44 @@
     let lastResult = null;
     let uploadPicked = [];
     let classConfValues = [];
+    let deviceInfo = { default: "auto", cuda_available: false };
 
     const MODEL_EXTS = /\.(py|onnx|pt|zip|yml|yaml|json|txt|md)$/i;
-    const DEFAULT_CLASS_NAMES = ["broom", "drainage gate", "nozzle", "track"];
-    const DEFAULT_CLASS_CONFS = [0.35, 0.70, 0.40, 0.70];
+
+    function classColor(name, index = 0) {
+      const key = (name || "").toLowerCase().trim();
+      return COLOR_BY_NAME[key] || COLOR_BY_NAME[key.replace(/_/g, " ")] || COLOR_PALETTE[index % COLOR_PALETTE.length] || "#8b9aab";
+    }
 
     function setStatus(msg, kind = "") {
       els.status.textContent = msg || "";
       els.status.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function canvasEmptyHtml() {
+      return `<input type="file" id="fileInput" accept="image/*" />
+        <div class="empty-hint">
+          <strong>Drop an image here</strong>
+          <span>or click to browse · JPG / PNG / WEBP</span>
+        </div>`;
+    }
+
+    function bindFileInput() {
+      els.file = document.getElementById("fileInput");
+      if (els.file) {
+        els.file.addEventListener("change", (e) => setFile(e.target.files[0]));
+      }
+    }
+
+    function showCanvasMedia(html) {
+      els.canvas.classList.add("has-media");
+      els.canvas.innerHTML = html;
+    }
+
+    function resetCanvas() {
+      els.canvas.classList.remove("has-media", "dragover");
+      els.canvas.innerHTML = canvasEmptyHtml();
+      bindFileInput();
     }
 
     function detailMessage(detail) {
@@ -608,6 +676,19 @@
       return models.find((x) => x.id === els.select.value) || null;
     }
 
+    function selectedDevice() {
+      return els.deviceSelect.value || "auto";
+    }
+
+    function syncDeviceOptions() {
+      const cuda = !!deviceInfo.cuda_available;
+      const cudaOpt = els.deviceSelect.querySelector('option[value="cuda"]');
+      if (cudaOpt) cudaOpt.disabled = !cuda;
+      if (!cuda && selectedDevice() === "cuda") {
+        els.deviceSelect.value = "cpu";
+      }
+    }
+
     function readClassConfs() {
       const inputs = els.confGrid.querySelectorAll("input[data-cls]");
       if (!inputs.length) return classConfValues.slice();
@@ -615,14 +696,19 @@
     }
 
     function buildClassConfSliders(names, confs) {
-      const ns = names && names.length ? names : DEFAULT_CLASS_NAMES;
+      const ns = (names && names.length) ? names : [];
+      if (!ns.length) {
+        els.confGrid.innerHTML = "";
+        classConfValues = [];
+        return;
+      }
       const cs = (confs && confs.length === ns.length)
         ? confs
-        : ns.map((_, i) => DEFAULT_CLASS_CONFS[i] ?? 0.25);
+        : ns.map(() => 0.25);
       classConfValues = cs.map(Number);
       els.confGrid.innerHTML = ns.map((name, i) => {
         const v = Number(cs[i]).toFixed(2);
-        const color = COLORS[name] || COLORS[name.replace(/_/g, " ")] || "#8b9aab";
+        const color = classColor(name, i);
         return `<div class="ctrl class-ctrl">
           <label>
             <span class="cls-name"><i class="swatch" style="background:${color};display:inline-block;margin-right:4px;vertical-align:middle"></i>${name}</span>
@@ -642,18 +728,32 @@
     }
 
     function syncPtControls(m) {
-      const isPt = !!(m && m.kind === "pt");
-      els.ptBar.classList.toggle("visible", isPt);
+      const hasModel = !!(m && (m.kind === "pt" || m.kind === "miner"));
+      els.ptBar.classList.toggle("visible", hasModel);
+      if (!hasModel) {
+        els.confGrid.innerHTML = "";
+        classConfValues = [];
+        els.rerunBtn.disabled = true;
+        return;
+      }
+      const isPt = m.kind === "pt";
+      if (els.imgszCtrl) els.imgszCtrl.hidden = !isPt;
       if (isPt) {
         const imgsz = m.default_imgsz || 640;
         els.imgszSlider.value = String(imgsz);
         els.imgszOut.textContent = String(imgsz);
-        buildClassConfSliders(m.class_names, m.default_confs);
-      } else {
-        els.confGrid.innerHTML = "";
-        classConfValues = [];
       }
-      els.rerunBtn.disabled = !(isPt && selectedFile);
+      buildClassConfSliders(m.class_names, m.default_confs);
+      els.rerunBtn.disabled = !selectedFile;
+    }
+
+    function canRun() {
+      return !!(selectedFile && els.select.value);
+    }
+
+    function canApplyRerun() {
+      const m = selectedModel();
+      return !!(selectedFile && m && (m.kind === "pt" || m.kind === "miner"));
     }
 
     function updateMeta() {
@@ -682,6 +782,13 @@
       const res = await fetch("/api/models");
       const data = await res.json();
       models = data.models || [];
+      if (data.device) {
+        deviceInfo = data.device;
+        if (data.device.default && ["auto", "cpu", "cuda"].includes(data.device.default)) {
+          els.deviceSelect.value = data.device.default;
+        }
+        syncDeviceOptions();
+      }
       const prefer = selectId || els.select.value;
       els.select.innerHTML = "";
       if (!models.length) {
@@ -726,10 +833,10 @@
       lastResult = null;
       els.run.disabled = !els.select.value;
       els.clear.disabled = false;
-      els.rerunBtn.disabled = !(selectedModel()?.kind === "pt");
+      els.rerunBtn.disabled = !canApplyRerun();
       els.stats.innerHTML = "";
       const url = URL.createObjectURL(file);
-      els.canvas.innerHTML = `<img src="${url}" alt="input" />`;
+      showCanvasMedia(`<img src="${url}" alt="input" />`);
       els.detList.innerHTML = `<div class="empty-hint" style="padding:1rem">Ready — click Run detection</div>`;
       setStatus(`Selected: ${file.name} (${(file.size / 1024).toFixed(0)} KB)`);
     }
@@ -738,21 +845,24 @@
       lastResult = data;
       const showOrig = els.showOriginal.checked;
       const b64 = showOrig ? data.original_b64 : data.image_b64;
-      els.canvas.innerHTML = `<img src="data:image/jpeg;base64,${b64}" alt="result" />`;
+      showCanvasMedia(`<img src="data:image/jpeg;base64,${b64}" alt="result" />`);
 
       const extra = [];
-      if (data.kind === "pt") {
-        if (Array.isArray(data.confs)) {
-          data.confs.forEach((c, i) => {
-            const name = (data.class_names && data.class_names[i]) || `c${i}`;
-            extra.push(`<span class="pill">${name} <strong>≥${Number(c).toFixed(2)}</strong></span>`);
-          });
-        } else if (data.conf != null) {
-          extra.push(`<span class="pill">conf <strong>${data.conf}</strong></span>`);
-        }
-        if (data.imgsz != null) extra.push(`<span class="pill">imgsz <strong>${data.imgsz}</strong></span>`);
+      if (Array.isArray(data.confs)) {
+        data.confs.forEach((c, i) => {
+          const name = (data.class_names && data.class_names[i]) || `c${i}`;
+          extra.push(`<span class="pill">${name} <strong>≥${Number(c).toFixed(2)}</strong></span>`);
+        });
+      } else if (data.conf != null) {
+        extra.push(`<span class="pill">conf <strong>${data.conf}</strong></span>`);
+      }
+      if (data.kind === "pt" && data.imgsz != null) {
+        extra.push(`<span class="pill">imgsz <strong>${data.imgsz}</strong></span>`);
       }
       if (data.device) extra.push(`<span class="pill">device <strong>${data.device}</strong></span>`);
+      if (data.device_mode && data.device_mode !== data.device) {
+        extra.push(`<span class="pill">mode <strong>${data.device_mode}</strong></span>`);
+      }
       const countBits = Object.entries(data.counts || {})
         .map(([k, v]) => `<span class="pill">${k} <strong>${v}</strong></span>`)
         .join("");
@@ -772,7 +882,8 @@
         .slice()
         .sort((a, b) => b.conf - a.conf)
         .map((d) => {
-          const c = COLORS[d.class] || "#aaa";
+          const idx = (data.class_names || []).indexOf(d.class);
+          const c = classColor(d.class, idx >= 0 ? idx : (d.cls_id || 0));
           const [x1, y1, x2, y2] = d.bbox;
           return `<div class="det">
             <i class="swatch" style="background:${c};margin-top:4px"></i>
@@ -787,7 +898,7 @@
     }
 
     async function run() {
-      if (!selectedFile || !els.select.value) return;
+      if (!canRun()) return;
       const m = selectedModel();
       els.run.disabled = true;
       els.rerunBtn.disabled = true;
@@ -795,11 +906,16 @@
       const fd = new FormData();
       fd.append("model_id", els.select.value);
       fd.append("file", selectedFile, selectedFile.name);
-      if (m && m.kind === "pt") {
+      fd.append("device", selectedDevice());
+      if (m && (m.kind === "pt" || m.kind === "miner")) {
         const confs = readClassConfs();
-        fd.append("conf", String(Math.min(...confs)));
-        fd.append("confs", JSON.stringify(confs));
-        fd.append("imgsz", els.imgszSlider.value);
+        if (confs.length) {
+          fd.append("conf", String(Math.min(...confs)));
+          fd.append("confs", JSON.stringify(confs));
+        }
+        if (m.kind === "pt") {
+          fd.append("imgsz", els.imgszSlider.value);
+        }
       }
       try {
         const res = await fetch("/api/predict", { method: "POST", body: fd });
@@ -810,8 +926,8 @@
       } catch (e) {
         setStatus(String(e.message || e), "error");
       } finally {
-        els.run.disabled = !selectedFile;
-        els.rerunBtn.disabled = !(selectedFile && selectedModel()?.kind === "pt");
+        els.run.disabled = !canRun();
+        els.rerunBtn.disabled = !canApplyRerun();
       }
     }
 
@@ -902,27 +1018,49 @@
       updateMeta();
       els.run.disabled = !(selectedFile && els.select.value);
     });
-    els.file.addEventListener("change", (e) => setFile(e.target.files[0]));
-    els.drop.addEventListener("dragover", (e) => {
+    els.deviceSelect.addEventListener("change", syncDeviceOptions);
+    bindFileInput();
+    els.canvas.addEventListener("dragover", (e) => {
       e.preventDefault();
-      els.drop.classList.add("dragover");
+      els.canvas.classList.add("dragover");
     });
-    els.drop.addEventListener("dragleave", () => els.drop.classList.remove("dragover"));
-    els.drop.addEventListener("drop", (e) => {
+    els.canvas.addEventListener("dragleave", (e) => {
+      if (!els.canvas.contains(e.relatedTarget)) {
+        els.canvas.classList.remove("dragover");
+      }
+    });
+    els.canvas.addEventListener("drop", (e) => {
       e.preventDefault();
-      els.drop.classList.remove("dragover");
+      els.canvas.classList.remove("dragover");
       setFile(e.dataTransfer.files[0]);
     });
     els.run.addEventListener("click", run);
     els.rerunBtn.addEventListener("click", run);
+    document.addEventListener("keydown", (e) => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const t = e.target;
+      if (t) {
+        const tag = (t.tagName || "").toUpperCase();
+        const type = (t.type || "").toLowerCase();
+        if (tag === "TEXTAREA" || tag === "SELECT" || (tag === "INPUT" && (type === "text" || type === "search" || type === "password"))) {
+          return;
+        }
+      }
+      e.preventDefault();
+      if (e.altKey) {
+        if (canApplyRerun() && !els.rerunBtn.disabled) run();
+      } else if (canRun() && !els.run.disabled) {
+        run();
+      }
+    });
     els.clear.addEventListener("click", () => {
       selectedFile = null;
       lastResult = null;
-      els.file.value = "";
       els.run.disabled = true;
       els.clear.disabled = true;
       els.rerunBtn.disabled = true;
-      els.canvas.innerHTML = `<div class="empty-hint">Prediction will appear here</div>`;
+      resetCanvas();
       els.detList.innerHTML = `<div class="empty-hint" style="padding:1rem">No results yet</div>`;
       els.stats.innerHTML = "";
       setStatus("");

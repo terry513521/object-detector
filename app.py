@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import base64
+import ast
 import importlib.util
+import os
 import re
 import shutil
 import threading
@@ -27,6 +29,10 @@ CAR_WASH = HERE.parent
 STATIC = HERE / "static"
 UPLOADS = HERE / "uploads"
 UPLOADS.mkdir(parents=True, exist_ok=True)
+
+# Default inference device: auto | cpu | cuda (gpu/0 accepted as cuda aliases).
+# Per-request Form field `device` overrides this without removing GPU support.
+DEFAULT_DEVICE_MODE = os.environ.get("DETECTOR_DEVICE", "auto")
 
 # Roots to scan for (miner.py + *.onnx) pairs.
 SCAN_ROOTS = [
@@ -54,10 +60,36 @@ CLASS_COLORS = {
     "nozzle": (231, 76, 60),
     "track": (52, 152, 219),
 }
+# Scalable fallback palette (RGB) — used by class index when name is unknown.
+CLASS_PALETTE = [
+    (46, 196, 182),
+    (255, 159, 28),
+    (231, 76, 60),
+    (52, 152, 219),
+    (155, 89, 182),
+    (46, 204, 113),
+    (241, 196, 15),
+    (230, 126, 34),
+    (26, 188, 156),
+    (52, 73, 94),
+    (149, 165, 166),
+    (192, 57, 43),
+]
 DEFAULT_COLOR = (180, 180, 180)
 FALLBACK_NAMES = ["broom", "drainage gate", "nozzle", "track"]
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 PT_NAME_PREFER = ("best_tw.pt", "best.pt", "last.pt", "weights.pt", "model.pt")
+
+
+def color_for_class(cls_id: int, raw_name: str) -> tuple[int, int, int]:
+    """Prefer known class colors; otherwise pick a stable palette color by index."""
+    key = (raw_name or "").strip()
+    named = CLASS_COLORS.get(key) or CLASS_COLORS.get(key.replace("_", " "))
+    if named:
+        return named
+    if CLASS_PALETTE:
+        return CLASS_PALETTE[int(cls_id) % len(CLASS_PALETTE)]
+    return DEFAULT_COLOR
 
 app = FastAPI(title="Object Detector")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -65,20 +97,53 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 _cache_lock = threading.Lock()
 _model_cache: dict[str, dict[str, Any]] = {}
 _pt_meta_cache: dict[str, tuple[float, int, list[str], list[float]]] = {}
-_device: str | None = None
+_miner_meta_cache: dict[str, tuple[float, list[str], list[float]]] = {}
 _runtime_ready = False
 
 
-def get_device() -> str:
-    global _device
-    if _device is None:
-        try:
-            import torch
+def cuda_available() -> bool:
+    """True only when a usable CUDA device is present (not merely ORT listing the EP)."""
+    try:
+        import torch
 
-            _device = "0" if torch.cuda.is_available() else "cpu"
-        except Exception:
-            _device = "cpu"
-    return _device
+        if torch.cuda.is_available():
+            return True
+    except Exception:
+        pass
+    # Fallback device-node check for hosts without a working torch CUDA build
+    return Path("/dev/nvidia0").exists()
+
+
+def normalize_device_mode(raw: str | None = None) -> str:
+    """Return canonical mode: auto | cpu | cuda."""
+    v = (raw if raw is not None else DEFAULT_DEVICE_MODE) or "auto"
+    v = str(v).strip().lower()
+    if v in ("gpu", "cuda", "0"):
+        return "cuda"
+    if v in ("cpu",):
+        return "cpu"
+    return "auto"
+
+
+def resolve_torch_device(mode: str | None = None) -> str:
+    """Ultralytics device string: 'cpu' or '0' (GPU). Keeps GPU path when requested/available."""
+    choice = normalize_device_mode(mode)
+    if choice == "cpu":
+        return "cpu"
+    if choice == "cuda":
+        if not cuda_available():
+            raise HTTPException(400, "GPU (CUDA) requested but CUDA is not available on this host")
+        return "0"
+    return "0" if cuda_available() else "cpu"
+
+
+def device_label(torch_device: str) -> str:
+    return "cuda" if torch_device not in ("cpu", "", None) else "cpu"
+
+
+def get_device(mode: str | None = None) -> str:
+    """Backward-compatible helper — resolves auto/cpu/cuda to torch device."""
+    return resolve_torch_device(mode)
 
 
 def ensure_runtime_ready() -> None:
@@ -89,10 +154,11 @@ def ensure_runtime_ready() -> None:
     with _cache_lock:
         if _runtime_ready:
             return
+        mode = normalize_device_mode()
         try:
             import torch
 
-            if torch.cuda.is_available():
+            if mode != "cpu" and torch.cuda.is_available():
                 torch.zeros(1, device="cuda").item()
                 torch.cuda.synchronize()
         except Exception as e:
@@ -104,23 +170,47 @@ def ensure_runtime_ready() -> None:
             so.log_severity_level = 3
             # Tiny no-op: just force EP libs to load if CUDA is listed
             print("ORT providers:", ort.get_available_providers())
+            print(f"DETECTOR_DEVICE={mode} cuda_available={cuda_available()}")
         except Exception as e:
             print(f"ORT warm-up skipped: {e}")
         _runtime_ready = True
 
 
-def _ort_providers() -> list[str]:
+def _ort_providers(mode: str | None = None) -> list[str]:
+    """Pick ORT EPs. GPU mode prefers CUDA; CPU mode forces CPU only."""
     try:
         import onnxruntime as ort
 
         available = set(ort.get_available_providers())
     except Exception:
         return ["CPUExecutionProvider"]
+
+    choice = normalize_device_mode(mode)
+    if choice == "cpu":
+        return ["CPUExecutionProvider"] if "CPUExecutionProvider" in available else list(available) or [
+            "CPUExecutionProvider"
+        ]
+    if choice == "cuda":
+        if not cuda_available() or "CUDAExecutionProvider" not in available:
+            raise HTTPException(
+                400,
+                "GPU (CUDA) requested but CUDA is not available on this host",
+            )
+        order = ["CUDAExecutionProvider"]
+        if "CPUExecutionProvider" in available:
+            order.append("CPUExecutionProvider")
+        return order
+    # auto: use CUDA only when a real GPU is present; always keep CPU fallback
     order = []
-    for p in ("CUDAExecutionProvider", "CPUExecutionProvider"):
-        if p in available:
-            order.append(p)
+    if cuda_available() and "CUDAExecutionProvider" in available:
+        order.append("CUDAExecutionProvider")
+    if "CPUExecutionProvider" in available:
+        order.append("CPUExecutionProvider")
     return order or ["CPUExecutionProvider"]
+
+
+def _cache_key(model_id: str, torch_device: str) -> str:
+    return f"{model_id}:::{device_label(torch_device)}"
 
 
 @dataclass
@@ -272,6 +362,57 @@ def _pt_meta(path: Path) -> tuple[int, list[str], list[float]]:
     return imgsz, names, confs
 
 
+def _miner_meta(folder: Path) -> tuple[list[str], list[float]]:
+    """Read class_names + per-class conf thresholds from miner.py (no ONNX load)."""
+    path = folder / "miner.py"
+    key = str(path.resolve())
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cached = _miner_meta_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1], cached[2]
+
+    names = list(FALLBACK_NAMES)
+    confs = _default_confs_for(names)
+    try:
+        src = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        _miner_meta_cache[key] = (mtime, names, confs)
+        return names, confs
+
+    m_names = re.search(r"self\.class_names\s*=\s*(\[[^\]]*\])", src)
+    if m_names:
+        try:
+            parsed = ast.literal_eval(m_names.group(1))
+            if isinstance(parsed, (list, tuple)) and parsed:
+                names = [str(x) for x in parsed]
+                confs = _default_confs_for(names)
+        except Exception:
+            pass
+
+    m_conf = re.search(
+        r"self\._conf_thres_array\s*=\s*np\.array\s*\(\s*(\[[^\]]*\])",
+        src,
+    )
+    if m_conf:
+        try:
+            parsed = ast.literal_eval(m_conf.group(1))
+            if isinstance(parsed, (list, tuple)) and parsed:
+                confs = [float(x) for x in parsed]
+        except Exception:
+            pass
+
+    if len(confs) < len(names):
+        confs = confs + [0.25] * (len(names) - len(confs))
+    elif len(confs) > len(names):
+        confs = confs[: len(names)]
+
+    _miner_meta_cache[key] = (mtime, names, confs)
+    return names, confs
+
+
 def _append_miner(models: list[ModelInfo], seen: set[Path], folder: Path) -> None:
     resolved = folder.resolve()
     if resolved in seen or not _is_miner_model(folder):
@@ -280,6 +421,7 @@ def _append_miner(models: list[ModelInfo], seen: set[Path], folder: Path) -> Non
     onnx = _find_onnx(folder)
     assert onnx is not None
     group = _group_for(folder)
+    names, confs = _miner_meta(folder)
     models.append(
         ModelInfo(
             id=_model_id_for(folder),
@@ -290,6 +432,9 @@ def _append_miner(models: list[ModelInfo], seen: set[Path], folder: Path) -> Non
             weights_mb=round(onnx.stat().st_size / (1024 * 1024), 2),
             kind="miner",
             uploaded=(group == "uploads"),
+            default_conf=float(min(confs) if confs else 0.25),
+            class_names=[display_name(n) for n in names],
+            default_confs=confs,
         )
     )
 
@@ -388,14 +533,16 @@ def _resolve_model(model_id: str) -> tuple[str, Path]:
     raise HTTPException(404, f"Unknown model: {model_id}")
 
 
-def load_model(model_id: str) -> dict[str, Any]:
+def load_model(model_id: str, device_mode: str | None = None) -> dict[str, Any]:
     ensure_runtime_ready()
+    mode = normalize_device_mode(device_mode)
+    torch_device = resolve_torch_device(mode)
+    key = _cache_key(model_id, torch_device)
     with _cache_lock:
-        if model_id in _model_cache:
-            return _model_cache[model_id]
+        if key in _model_cache:
+            return _model_cache[key]
 
     kind, path = _resolve_model(model_id)
-    device = get_device()
     if kind == "miner":
         folder = path
         mod_name = "viewer_miner_" + re.sub(r"[^A-Za-z0-9_]", "_", model_id)
@@ -410,21 +557,28 @@ def load_model(model_id: str) -> dict[str, Any]:
             if hasattr(mod.Miner, "_warmup"):
                 mod.Miner._warmup = lambda self, iters=1: None  # type: ignore[method-assign]
             obj = mod.Miner(folder)
-            # Prefer CUDA session if miner fell back / ignored providers
+            # Align ORT session with requested device mode (GPU kept when selected/available).
             try:
                 import onnxruntime as ort
 
-                providers = obj.session.get_providers()
-                if "CUDAExecutionProvider" not in providers and "CUDAExecutionProvider" in ort.get_available_providers():
+                providers = _ort_providers(mode)
+                want_cuda = "CUDAExecutionProvider" in providers
+                have_cuda = "CUDAExecutionProvider" in obj.session.get_providers()
+                need_rebuild = (want_cuda and not have_cuda) or (not want_cuda and have_cuda) or (
+                    obj.session.get_providers()[: len(providers)] != providers
+                )
+                if need_rebuild:
                     onnx_path = folder / "weights.onnx"
                     if not onnx_path.is_file():
                         onnx_path = next(folder.glob("*.onnx"))
                     so = ort.SessionOptions()
                     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
                     obj.session = ort.InferenceSession(
-                        str(onnx_path), sess_options=so, providers=_ort_providers(),
+                        str(onnx_path), sess_options=so, providers=providers,
                     )
-                    print("Rebuilt ORT session with", obj.session.get_providers())
+                    print("Rebuilt ORT session with", obj.session.get_providers(), f"(mode={mode})")
+            except HTTPException:
+                raise
             except Exception as e:
                 print(f"ORT session rebuild skipped: {e}")
             # One warm inference
@@ -433,13 +587,22 @@ def load_model(model_id: str) -> dict[str, Any]:
                 obj.predict_batch([dummy], 0, 0)
             except Exception as e:
                 print(f"miner warm predict skipped: {e}")
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(500, f"Miner init failed: {e}") from e
+        used = (
+            "cuda"
+            if "CUDAExecutionProvider" in getattr(obj.session, "get_providers", lambda: [])()
+            else "cpu"
+        )
         entry = {
             "kind": "miner",
             "obj": obj,
             "path": folder,
-            "device": "cuda" if "CUDAExecutionProvider" in getattr(obj.session, "get_providers", lambda: [])() else "cpu",
+            "device": used,
+            "device_mode": mode,
+            "cache_key": key,
         }
     else:
         try:
@@ -453,13 +616,22 @@ def load_model(model_id: str) -> dict[str, Any]:
             except Exception:
                 pass
             dummy = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
-            obj.predict(dummy, imgsz=imgsz, device=device, verbose=False)
+            obj.predict(dummy, imgsz=imgsz, device=torch_device, verbose=False)
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(500, f"YOLO .pt load failed: {e}") from e
-        entry = {"kind": "pt", "obj": obj, "path": path, "device": device}
+        entry = {
+            "kind": "pt",
+            "obj": obj,
+            "path": path,
+            "device": torch_device,
+            "device_mode": mode,
+            "cache_key": key,
+        }
 
     with _cache_lock:
-        _model_cache[model_id] = entry
+        _model_cache[key] = entry
     return entry
 
 
@@ -479,16 +651,51 @@ def display_name(name: str) -> str:
     return name.replace("_", " ")
 
 
-def predict_miner(entry: dict[str, Any], image: np.ndarray) -> list[DetBox]:
-    results = entry["obj"].predict_batch([image], 0, 0)
-    boxes = results[0].boxes if results else []
-    return [
-        DetBox(
-            x1=int(b.x1), y1=int(b.y1), x2=int(b.x2), y2=int(b.y2),
-            cls_id=int(b.cls_id), conf=float(b.conf),
-        )
-        for b in boxes
-    ]
+def predict_miner(
+    entry: dict[str, Any],
+    image: np.ndarray,
+    conf: float | None = None,
+    confs: list[float] | None = None,
+) -> tuple[list[DetBox], list[float]]:
+    """Run miner inference; temporarily apply UI per-class thresholds when provided."""
+    obj = entry["obj"]
+    names = class_names_for(entry)
+    n_cls = max(1, len(names))
+
+    native = getattr(obj, "_conf_thres_array", None)
+    if confs is None or len(confs) == 0:
+        if native is not None and len(native):
+            thr = [float(x) for x in list(native)]
+        elif conf is not None:
+            thr = [float(np.clip(conf, 0.01, 0.99))] * n_cls
+        else:
+            thr = _default_confs_for(names)
+    else:
+        thr = [float(np.clip(c, 0.01, 0.99)) for c in confs]
+
+    if len(thr) < n_cls:
+        thr = thr + [thr[-1] if thr else 0.25] * (n_cls - len(thr))
+    elif len(thr) > n_cls:
+        thr = thr[:n_cls]
+
+    prev = None
+    if hasattr(obj, "_conf_thres_array"):
+        prev = np.array(obj._conf_thres_array, dtype=np.float32, copy=True)
+        obj._conf_thres_array = np.array(thr, dtype=np.float32)
+    try:
+        results = obj.predict_batch([image], 0, 0)
+        boxes = results[0].boxes if results else []
+        out = [
+            DetBox(
+                x1=int(b.x1), y1=int(b.y1), x2=int(b.x2), y2=int(b.y2),
+                cls_id=int(b.cls_id), conf=float(b.conf),
+            )
+            for b in boxes
+        ]
+    finally:
+        if prev is not None:
+            obj._conf_thres_array = prev
+    return out, thr
 
 
 def predict_pt(
@@ -511,7 +718,7 @@ def predict_pt(
 
     floor = float(min(thr)) if thr else 0.25
     imgsz = int(np.clip(imgsz, 32, 2048))
-    device = entry.get("device") or get_device()
+    device = entry.get("device") or resolve_torch_device(entry.get("device_mode"))
     results = entry["obj"].predict(
         source=image,
         conf=floor,
@@ -568,6 +775,7 @@ async def api_predict(
     conf: float = Form(0.25),
     imgsz: int = Form(640),
     confs: str = Form(""),
+    device: str = Form(""),
 ):
     raw = await file.read()
     if not raw:
@@ -577,9 +785,10 @@ async def api_predict(
     if image is None:
         raise HTTPException(400, "Could not decode image")
 
+    device_mode = device.strip() or None
     t_load0 = time.perf_counter()
     try:
-        entry = load_model(model_id)
+        entry = load_model(model_id, device_mode=device_mode)
         names = class_names_for(entry)
     except HTTPException:
         raise
@@ -590,13 +799,14 @@ async def api_predict(
 
     t0 = time.perf_counter()
     try:
+        conf_list = parse_confs_form(confs, conf, len(names))
         if entry["kind"] == "miner":
-            boxes = predict_miner(entry, image)
-            used_conf = None
-            used_confs = None
+            boxes, used_confs = predict_miner(
+                entry, image, conf=conf, confs=conf_list,
+            )
+            used_conf = float(min(used_confs)) if used_confs else float(conf)
             used_imgsz = None
         else:
-            conf_list = parse_confs_form(confs, conf, len(names))
             boxes, used_confs = predict_pt(
                 entry, image, conf=conf, imgsz=imgsz, confs=conf_list,
             )
@@ -639,7 +849,8 @@ async def api_predict(
         "conf": used_conf,
         "confs": used_confs,
         "imgsz": used_imgsz,
-        "device": entry.get("device"),
+        "device": device_label(str(entry.get("device") or "cpu")),
+        "device_mode": entry.get("device_mode") or normalize_device_mode(device_mode),
         "image_b64": encode_jpeg_b64(annotated),
         "original_b64": encode_jpeg_b64(image, quality=85),
     }
@@ -659,7 +870,7 @@ def draw_boxes(
         cls_id = int(b.cls_id)
         raw = names[cls_id] if 0 <= cls_id < len(names) else f"cls{cls_id}"
         name = display_name(raw)
-        color = CLASS_COLORS.get(raw) or CLASS_COLORS.get(name) or DEFAULT_COLOR
+        color = color_for_class(cls_id, raw)
         bgr = (color[2], color[1], color[0])
         x1, y1, x2, y2 = int(b.x1), int(b.y1), int(b.x2), int(b.y2)
         cv2.rectangle(out, (x1, y1), (x2, y2), bgr, thickness)
@@ -753,7 +964,24 @@ def index():
 
 @app.get("/api/models")
 def api_models():
-    return {"models": [m.model_dump() for m in discover_models()]}
+    return {
+        "models": [m.model_dump() for m in discover_models()],
+        "device": {
+            "default": normalize_device_mode(),
+            "cuda_available": cuda_available(),
+            "options": ["auto", "cpu", "cuda"],
+        },
+    }
+
+
+@app.get("/api/device")
+def api_device():
+    return {
+        "default": normalize_device_mode(),
+        "cuda_available": cuda_available(),
+        "resolved": device_label(resolve_torch_device()),
+        "options": ["auto", "cpu", "cuda"],
+    }
 
 
 @app.post("/api/models/upload")
@@ -826,7 +1054,9 @@ async def api_upload_model(
                 mid_candidates.append(_model_id_for(pt))
             with _cache_lock:
                 for mid in mid_candidates:
-                    _model_cache.pop(mid, None)
+                    prefix = f"{mid}:::"
+                    for key in [k for k in _model_cache if k == mid or k.startswith(prefix)]:
+                        _model_cache.pop(key, None)
             shutil.rmtree(dest)
         shutil.move(str(tmp), str(dest))
         tmp = None
@@ -860,7 +1090,9 @@ def api_delete_uploaded(model_name: str):
         mids.append(_model_id_for(pt))
     with _cache_lock:
         for mid in mids:
-            _model_cache.pop(mid, None)
+            prefix = f"{mid}:::"
+            for key in [k for k in _model_cache if k == mid or k.startswith(prefix)]:
+                _model_cache.pop(key, None)
     shutil.rmtree(dest)
     return {"ok": True, "deleted": model_name}
 
@@ -868,11 +1100,16 @@ def api_delete_uploaded(model_name: str):
 @app.post("/api/unload")
 def api_unload(model_id: str = Form(...)):
     with _cache_lock:
-        _model_cache.pop(model_id, None)
-    return {"ok": True, "remaining": list(_model_cache)}
+        prefix = f"{model_id}:::"
+        removed = [k for k in list(_model_cache) if k == model_id or k.startswith(prefix)]
+        for key in removed:
+            _model_cache.pop(key, None)
+    return {"ok": True, "removed": removed, "remaining": list(_model_cache)}
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="0.0.0.0", port=7860, reload=False)
+    host = os.environ.get("DETECTOR_HOST", "0.0.0.0")
+    port = int(os.environ.get("DETECTOR_PORT", "7860"))
+    uvicorn.run("app:app", host=host, port=port, reload=False)

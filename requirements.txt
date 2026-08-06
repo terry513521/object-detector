@@ -2,7 +2,8 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 opencv-python-headless>=4.8
 numpy>=1.24
-# 1.28+ needs CUDA 13; pin 1.22 for CUDA 12.x (matches torch cu128)
+# Install onnxruntime-gpu on CUDA hosts (keeps GPU mode).
+# On CPU-only hosts, swap to: pip install onnxruntime
 onnxruntime-gpu==1.22.0
 ultralytics>=8.0
 pydantic>=2.0
