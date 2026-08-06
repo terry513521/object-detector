@@ -29,7 +29,7 @@ from typing import Any
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -112,18 +112,19 @@ def _build_scan_layout() -> tuple[list[Path], list[Path], list[tuple[Path, tuple
 SCAN_ROOTS, PT_EXTRA_FILES, PT_DIR_GLOBS = _build_scan_layout()
 
 CLASS_COLORS = {
-    "broom": (46, 196, 182),
-    "drainage gate": (255, 159, 28),
-    "drainage_gate": (255, 159, 28),
-    "nozzle": (231, 76, 60),
-    "track": (52, 152, 219),
+    # Matched to Ultralytics-style reference annotation colors
+    "broom": (220, 70, 25),
+    "drainage gate": (150, 205, 30),
+    "drainage_gate": (150, 205, 30),
+    "nozzle": (30, 200, 100),
+    "track": (30, 110, 215),
 }
 # Scalable fallback palette (RGB) — used by class index when name is unknown.
 CLASS_PALETTE = [
-    (46, 196, 182),
-    (255, 159, 28),
-    (231, 76, 60),
-    (52, 152, 219),
+    (220, 70, 25),
+    (150, 205, 30),
+    (30, 200, 100),
+    (30, 110, 215),
     (155, 89, 182),
     (46, 204, 113),
     (241, 196, 15),
@@ -935,11 +936,14 @@ def _write_thumb(annotated_bgr: np.ndarray, path: Path, max_w: int = 480) -> Non
 
 
 def _result_urls(model_id: str, result_id: str) -> dict[str, str]:
-    q = f"model_id={model_id}"
+    from urllib.parse import quote
+
+    q = f"model_id={quote(model_id, safe='')}"
+    rid = quote(result_id, safe="")
     return {
-        "image_url": f"/api/results/{result_id}/annotated?{q}",
-        "original_url": f"/api/results/{result_id}/original?{q}",
-        "preview_url": f"/api/results/{result_id}/preview?{q}",
+        "image_url": f"/api/results/{rid}/annotated?{q}",
+        "original_url": f"/api/results/{rid}/original?{q}",
+        "preview_url": f"/api/results/{rid}/preview?{q}",
     }
 
 
@@ -1263,33 +1267,102 @@ def draw_boxes(
     boxes: list[DetBox],
     names: list[str],
 ) -> np.ndarray:
+    """Draw detections with visible box edges even when labels crowd together.
+
+    Labels are small outline text (no filled background). Box outlines are
+    redrawn last so rectangles stay visible under dense detections.
+    """
     out = image_bgr.copy()
     h, w = out.shape[:2]
-    thickness = max(2, int(round(min(h, w) / 400)))
-    font_scale = max(0.45, min(h, w) / 900)
+    thickness = max(2, int(round(min(h, w) / 480)))
+    font_scale = max(0.58, min(0.85, min(h, w) / 850))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_thick = 2
+    pad = 2
 
-    for b in boxes:
+    # Lower confidence first so stronger detections / labels end up on top.
+    ordered = sorted(boxes, key=lambda b: float(b.conf))
+
+    def _meta(b: DetBox) -> tuple[int, str, tuple[int, int, int], int, int, int, int]:
         cls_id = int(b.cls_id)
         raw = names[cls_id] if 0 <= cls_id < len(names) else f"cls{cls_id}"
         name = display_name(raw)
         color = color_for_class(cls_id, raw)
-        bgr = (color[2], color[1], color[0])
+        bgr = (int(color[2]), int(color[1]), int(color[0]))
         x1, y1, x2, y2 = int(b.x1), int(b.y1), int(b.x2), int(b.y2)
+        x1, y1 = max(0, min(w - 1, x1)), max(0, min(h - 1, y1))
+        x2, y2 = max(0, min(w - 1, x2)), max(0, min(h - 1, y2))
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        return cls_id, name, bgr, x1, y1, x2, y2
+
+    # Pass 1 — rectangles only
+    for b in ordered:
+        _, _, bgr, x1, y1, x2, y2 = _meta(b)
         cv2.rectangle(out, (x1, y1), (x2, y2), bgr, thickness)
+
+    def _overlap_area(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0
+        return (ix2 - ix1) * (iy2 - iy1)
+
+    occupied: list[tuple[int, int, int, int]] = []
+
+    # Pass 2 — small text labels, no filled background
+    for b in ordered:
+        _, name, bgr, x1, y1, x2, y2 = _meta(b)
         label = f"{name} {float(b.conf):.2f}"
-        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-        ty = max(0, y1 - th - baseline - 4)
-        cv2.rectangle(out, (x1, ty), (x1 + tw + 6, y1), bgr, -1)
-        cv2.putText(
-            out,
-            label,
-            (x1 + 3, y1 - 4),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            font_scale,
-            (20, 20, 20),
-            max(1, thickness - 1),
-            cv2.LINE_AA,
-        )
+        (tw, th), baseline = cv2.getTextSize(label, font, font_scale, text_thick)
+        lw = tw + pad * 2
+        lh = th + baseline + pad * 2
+
+        candidates = [
+            (x1, y1 - lh),
+            (x2 - lw, y1 - lh),
+            (x1, y2),
+            (x2 - lw, y2),
+            (x1, y1),
+            (x2 - lw, y1),
+            (x1, y2 - lh),
+            (x2 - lw, y2 - lh),
+            ((x1 + x2 - lw) // 2, y1 - lh),
+            ((x1 + x2 - lw) // 2, y2),
+        ]
+
+        best: tuple[int, int, int, int] | None = None
+        best_score = None
+        for lx, ly in candidates:
+            lx = int(max(0, min(w - lw, lx)))
+            ly = int(max(0, min(h - lh, ly)))
+            rect = (lx, ly, lx + lw, ly + lh)
+            score = sum(_overlap_area(rect, o) for o in occupied)
+            if lx >= x1 and ly >= y1 and lx + lw <= x2 and ly + lh <= y2:
+                score += 50
+            if best_score is None or score < best_score:
+                best_score = score
+                best = rect
+                if score == 0:
+                    break
+
+        assert best is not None
+        lx1, ly1, lx2, ly2 = best
+        occupied.append(best)
+
+        tx = lx1 + pad
+        ty = ly1 + pad + th
+        cv2.putText(out, label, (tx, ty), font, font_scale, bgr, text_thick, cv2.LINE_AA)
+
+    # Pass 3 — redraw box outlines so edges stay visible under stacked labels
+    for b in ordered:
+        _, _, bgr, x1, y1, x2, y2 = _meta(b)
+        cv2.rectangle(out, (x1, y1), (x2, y2), bgr, thickness)
+
     return out
 
 
@@ -1396,13 +1469,13 @@ def api_device():
 async def api_upload_model(
     name: str = Form(...),
     files: list[UploadFile] = File(...),
-    overwrite: bool = Form(False),
+    overwrite: bool = Form(True),
 ):
     """Upload miner+ONNX, a .pt file, or a zip containing either."""
     model_name = _sanitize_name(name)
     dest = UPLOADS / model_name
     if dest.exists() and not overwrite:
-        raise HTTPException(409, f"Model '{model_name}' already exists. Enable overwrite to replace.")
+        raise HTTPException(409, f"Model '{model_name}' already exists.")
 
     if not files:
         raise HTTPException(400, "No files uploaded")
@@ -1503,6 +1576,37 @@ def api_delete_uploaded(model_name: str):
                 _model_cache.pop(key, None)
     shutil.rmtree(dest)
     return {"ok": True, "deleted": model_name}
+
+
+@app.get("/api/models/{model_name}/download")
+def api_download_uploaded(model_name: str):
+    """Download an uploaded model folder as a zip."""
+    import io
+
+    model_name = _sanitize_name(model_name)
+    dest = (UPLOADS / model_name).resolve()
+    if not _is_under(dest, UPLOADS):
+        raise HTTPException(400, "Invalid name")
+    if not dest.is_dir():
+        raise HTTPException(404, f"Uploaded model not found: {model_name}")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(dest.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.name.startswith("."):
+                continue
+            zf.write(path, path.relative_to(dest).as_posix())
+    data = buf.getvalue()
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{model_name}.zip"',
+            "Content-Length": str(len(data)),
+        },
+    )
 
 
 @app.post("/api/unload")
