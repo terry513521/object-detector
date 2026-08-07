@@ -22,6 +22,7 @@ import threading
 import time
 import traceback
 import zipfile
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,56 @@ UPLOADS.mkdir(parents=True, exist_ok=True)
 RESULTS = HERE / "cache" / "results"
 RESULTS.mkdir(parents=True, exist_ok=True)
 
+# Dirs skipped while walking for miner.py / .pt packages.
+_SCAN_SKIP_DIRS = {
+    ".git",
+    ".hf_home",
+    ".cache",
+    ".venv",
+    ".venv-backups",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    "datasets",
+    "cache",
+    "static",
+    "uploads",
+}
+
+
+def _dir_has_miner_pair(folder: Path) -> bool:
+    """True when folder looks like a deployable miner+ONNX package."""
+    if not folder.is_dir() or not (folder / "miner.py").is_file():
+        return False
+    if (folder / "weights.onnx").is_file():
+        return True
+    try:
+        return any(p.is_file() for p in folder.glob("*.onnx"))
+    except OSError:
+        return False
+
+
+def _parent_has_models(parent: Path) -> bool:
+    """True when parent looks like a workspace that contains detector models."""
+    if any((parent / name).is_dir() for name in ("layer", "full", "finetune", "models")):
+        return True
+    try:
+        for child in parent.iterdir():
+            name = child.name
+            if name.startswith(".") or name in _SCAN_SKIP_DIRS:
+                continue
+            if child.is_file() and child.suffix.lower() == ".pt":
+                return True
+            if child.is_dir() and _dir_has_miner_pair(child):
+                return True
+            # Nested package roots commonly used in this monorepo.
+            if child.is_dir() and name in ("best", "origin", "scratch"):
+                if _dir_has_miner_pair(child) or any(child.glob("*.pt")):
+                    return True
+    except OSError:
+        pass
+    return False
+
 
 def _default_id_root() -> Path:
     """Project root for model IDs. Use parent when sibling model trees exist."""
@@ -47,7 +98,7 @@ def _default_id_root() -> Path:
     if env:
         return Path(env).expanduser().resolve()
     parent = HERE.parent
-    if any((parent / name).is_dir() for name in ("layer", "full")):
+    if _parent_has_models(parent):
         return parent.resolve()
     return HERE.resolve()
 
@@ -59,9 +110,15 @@ CAR_WASH = ID_ROOT
 # Default inference device: auto | cpu | cuda (gpu/0 accepted as cuda aliases).
 DEFAULT_DEVICE_MODE = os.environ.get("DETECTOR_DEVICE", "auto")
 
+_PT_PREFERRED_NAMES = ("best_tw.pt", "best.pt", "last.pt", "weights.pt", "model.pt")
+
 
 def _build_scan_layout() -> tuple[list[Path], list[Path], list[tuple[Path, tuple[str, ...]]]]:
-    """Discover model scan roots relative to ID_ROOT / env (cross-platform)."""
+    """Discover model scan roots relative to ID_ROOT / env (cross-platform).
+
+    SCAN_ROOTS are directories whose *children* are model packages (miner+onnx or .pt).
+    Also auto-finds nested miner packages and preferred .pt weights under ID_ROOT.
+    """
     roots: list[Path] = [UPLOADS]
     extra = os.environ.get("DETECTOR_SCAN_ROOTS", "")
     for part in extra.split(os.pathsep):
@@ -69,12 +126,21 @@ def _build_scan_layout() -> tuple[list[Path], list[Path], list[tuple[Path, tuple
         if part:
             roots.append(Path(part).expanduser().resolve())
 
-    # Optional sibling / workspace layout (car-wash style), only if present.
+    # Scan ID_ROOT children (e.g. workspace/best, workspace/origin, workspace/scratch).
+    if ID_ROOT.is_dir():
+        roots.append(ID_ROOT)
+
+    # Known nested layouts (car-wash + finetune monorepo), only if present.
     for rel in (
         ("layer", "models"),
         ("layer", "_cand"),
         ("layer", "exports"),
         ("full", "exports"),
+        ("finetune", "models"),
+        ("finetune", "deploy"),
+        ("models",),
+        ("exports",),
+        ("deploy",),
     ):
         p = ID_ROOT.joinpath(*rel)
         if p.is_dir():
@@ -84,12 +150,21 @@ def _build_scan_layout() -> tuple[list[Path], list[Path], list[tuple[Path, tuple
     best = ID_ROOT / "full" / "best.pt"
     if best.is_file():
         pt_files.append(best)
+    # Top-level .pt next to the viewer (e.g. workspace/yolo26n.pt).
+    try:
+        for pt in sorted(ID_ROOT.glob("*.pt")):
+            if pt.is_file():
+                pt_files.append(pt)
+    except OSError:
+        pass
 
     pt_globs: list[tuple[Path, tuple[str, ...]]] = []
     for base, names in (
-        (ID_ROOT / "full" / "exports", ("best.pt", "best_tw.pt", "last.pt", "weights.pt", "model.pt")),
-        (ID_ROOT / "layer" / "exports", ("best.pt", "best_tw.pt", "last.pt", "weights.pt", "model.pt")),
+        (ID_ROOT / "full" / "exports", _PT_PREFERRED_NAMES),
+        (ID_ROOT / "layer" / "exports", _PT_PREFERRED_NAMES),
         (ID_ROOT / "full" / "runs", ("best.pt", "best_tw.pt")),
+        (ID_ROOT / "scratch", _PT_PREFERRED_NAMES),
+        (ID_ROOT / "finetune", ("best.pt", "best_tw.pt", "weights.pt")),
     ):
         if base.is_dir():
             pt_globs.append((base, names))
@@ -107,6 +182,34 @@ def _build_scan_layout() -> tuple[list[Path], list[Path], list[tuple[Path, tuple
         seen.add(key)
         uniq.append(r)
     return uniq, pt_files, pt_globs
+
+
+def _iter_nested_miner_dirs(root: Path, *, max_depth: int = 4) -> list[Path]:
+    """Walk root for miner.py + *.onnx packages (skips heavy/irrelevant trees)."""
+    found: list[Path] = []
+    root = root.resolve()
+
+    def walk(cur: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        try:
+            children = list(cur.iterdir())
+        except OSError:
+            return
+        if _dir_has_miner_pair(cur):
+            found.append(cur)
+            return  # don't descend into a package
+        for child in children:
+            name = child.name
+            if not child.is_dir() or name.startswith(".") or name in _SCAN_SKIP_DIRS:
+                continue
+            # Don't re-enter the viewer app tree when scanning the workspace.
+            if child.resolve() == HERE.resolve():
+                continue
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    return found
 
 
 SCAN_ROOTS, PT_EXTRA_FILES, PT_DIR_GLOBS = _build_scan_layout()
@@ -150,7 +253,14 @@ def color_for_class(cls_id: int, raw_name: str) -> tuple[int, int, int]:
         return CLASS_PALETTE[int(cls_id) % len(CLASS_PALETTE)]
     return DEFAULT_COLOR
 
-app = FastAPI(title="Object Detector")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Kick CUDA/ORT in background so first click is fast
+    threading.Thread(target=ensure_runtime_ready, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="Object Detector", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _cache_lock = threading.Lock()
@@ -365,6 +475,11 @@ def _group_for(path: Path) -> str:
         rel = resolved.relative_to(ID_ROOT.resolve())
     except ValueError:
         rel = resolved.relative_to(HERE.resolve())
+    # file sitting directly in a folder → group by that folder (scratch/best.pt → scratch)
+    if resolved.is_file() and len(rel.parts) == 2:
+        return rel.parts[0]
+    if resolved.is_file() and len(rel.parts) == 1:
+        return ID_ROOT.name or "root"
     if len(rel.parts) >= 2:
         return f"{rel.parts[0]}/{rel.parts[1]}"
     return rel.parts[0]
@@ -574,28 +689,51 @@ def _append_pt(models: list[ModelInfo], seen: set[Path], pt: Path, name: str | N
 def discover_models() -> list[ModelInfo]:
     seen: set[Path] = set()
     models: list[ModelInfo] = []
+    # Rebuild each call so newly added folders/weights show up without restart.
+    scan_roots, pt_extra, pt_globs = _build_scan_layout()
 
-    for root in SCAN_ROOTS:
+    for root in scan_roots:
         if not root.is_dir():
             continue
+        root_res = root.resolve()
+        id_res = ID_ROOT.resolve()
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
-            if folder.name.startswith("."):
+            if folder.name.startswith(".") or folder.name in _SCAN_SKIP_DIRS:
+                continue
+            if folder.resolve() == HERE.resolve():
                 continue
             if _is_miner_model(folder):
                 _append_miner(models, seen, folder)
             elif _is_pt_folder(folder):
                 pt = _find_pt(folder)
-                if pt:
-                    _append_pt(models, seen, pt, name=folder.name)
+                if not pt:
+                    continue
+                # At workspace root, skip code trees that only happen to contain a .pt
+                if root_res == id_res:
+                    prefer = {n.lower() for n in PT_NAME_PREFER}
+                    if pt.name.lower() not in prefer and folder.name.lower() not in (
+                        "scratch",
+                        "exports",
+                        "runs",
+                        "weights",
+                    ):
+                        continue
+                _append_pt(models, seen, pt, name=folder.name)
 
-    for pt in PT_EXTRA_FILES:
+    # Nested miner packages under ID_ROOT (finetune/models/*, deploy/*, …)
+    if ID_ROOT.is_dir() and ID_ROOT.resolve() != HERE.resolve():
+        for folder in _iter_nested_miner_dirs(ID_ROOT, max_depth=4):
+            _append_miner(models, seen, folder)
+
+    for pt in pt_extra:
         _append_pt(models, seen, pt)
 
-    for base, names in PT_DIR_GLOBS:
+    for base, names in pt_globs:
         if not base.is_dir():
             continue
+        name_set = {n.lower() for n in names}
         for pt in base.rglob("*.pt"):
-            if pt.name.lower() not in {n.lower() for n in names}:
+            if pt.name.lower() not in name_set:
                 continue
             # Skip noisy intermediate paths under runs/*/weights/epoch*
             if pt.name.lower().startswith("epoch"):
@@ -610,16 +748,18 @@ def discover_models() -> list[ModelInfo]:
         "full/exports": 3,
         "full/runs": 4,
         "layer/_cand": 5,
+        "finetune/models": 6,
+        "finetune/deploy": 7,
     }
-    models.sort(key=lambda m: (0 if m.kind == "pt" and m.uploaded else 1,
-                               order.get(m.group, 9),
-                               0 if m.kind == "miner" else 1,
-                               m.name.lower()))
     # Prefer uploads first overall
-    models.sort(key=lambda m: (0 if m.group == "uploads" else 1,
-                               order.get(m.group, 9),
-                               0 if m.kind == "miner" else 1,
-                               m.name.lower()))
+    models.sort(
+        key=lambda m: (
+            0 if m.group == "uploads" else 1,
+            order.get(m.group, 9),
+            0 if m.kind == "miner" else 1,
+            m.name.lower(),
+        )
+    )
     return models
 
 
@@ -1426,12 +1566,6 @@ def _ensure_weights_onnx(folder: Path) -> None:
     shutil.copy2(onnx, folder / "weights.onnx")
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    # Kick CUDA/ORT in background so first click is fast
-    threading.Thread(target=ensure_runtime_ready, daemon=True).start()
-
-
 @app.get("/")
 def index():
     return FileResponse(STATIC / "index.html")
@@ -1557,53 +1691,122 @@ async def api_upload_model(
     return {"ok": True, "model": info.model_dump()}
 
 
+def _evict_model_cache(model_id: str) -> list[str]:
+    with _cache_lock:
+        prefix = f"{model_id}:::"
+        removed = [k for k in list(_model_cache) if k == model_id or k.startswith(prefix)]
+        for key in removed:
+            _model_cache.pop(key, None)
+        return removed
+
+
+def _zip_model_bytes(kind: str, path: Path) -> tuple[bytes, str]:
+    """Build a zip for a miner folder or a single .pt file. Returns (bytes, filename)."""
+    import io
+
+    buf = io.BytesIO()
+    if kind == "miner" or path.is_dir():
+        folder = path if path.is_dir() else path.parent
+        zip_name = f"{folder.name}.zip"
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fp in sorted(folder.rglob("*")):
+                if not fp.is_file() or fp.name.startswith("."):
+                    continue
+                zf.write(fp, fp.relative_to(folder).as_posix())
+    else:
+        zip_name = f"{path.stem}.zip"
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(path, path.name)
+    return buf.getvalue(), zip_name
+
+
 @app.delete("/api/models/{model_name}")
 def api_delete_uploaded(model_name: str):
+    """Backward-compat: delete by upload folder name."""
     model_name = _sanitize_name(model_name)
     dest = (UPLOADS / model_name).resolve()
     if not _is_under(dest, UPLOADS):
         raise HTTPException(400, "Invalid name")
     if not dest.is_dir():
         raise HTTPException(404, f"Uploaded model not found: {model_name}")
-    mids = [_model_id_for(dest)]
+    mid = _model_id_for(dest)
     pt = _find_pt(dest)
+    _evict_model_cache(mid)
     if pt:
-        mids.append(_model_id_for(pt))
-    with _cache_lock:
-        for mid in mids:
-            prefix = f"{mid}:::"
-            for key in [k for k in _model_cache if k == mid or k.startswith(prefix)]:
-                _model_cache.pop(key, None)
+        _evict_model_cache(_model_id_for(pt))
     shutil.rmtree(dest)
     return {"ok": True, "deleted": model_name}
 
 
+@app.delete("/api/model")
+def api_delete_model(model_id: str):
+    """Delete any discovered model (upload or workspace) by id."""
+    kind, path = _resolve_model(model_id)
+    path = path.resolve()
+    if not (_is_under(path, ID_ROOT) or _is_under(path, HERE)):
+        raise HTTPException(400, "Path outside project roots")
+    # Never delete the app itself or scan roots wholesale
+    if path in (HERE.resolve(), ID_ROOT.resolve(), UPLOADS.resolve(), STATIC.resolve()):
+        raise HTTPException(400, "Refusing to delete project root")
+
+    mid = _model_id_for(path if path.is_dir() else path)
+    _evict_model_cache(mid)
+    if kind == "pt" and path.is_file():
+        # If the .pt sits alone in an uploads package folder, remove the folder.
+        parent = path.parent
+        if _is_under(parent, UPLOADS) and parent != UPLOADS.resolve():
+            siblings = [p for p in parent.iterdir() if not p.name.startswith(".")]
+            if len(siblings) == 1 and siblings[0] == path:
+                _evict_model_cache(_model_id_for(parent))
+                shutil.rmtree(parent)
+                return {"ok": True, "deleted": model_id, "path": str(parent)}
+        path.unlink()
+        return {"ok": True, "deleted": model_id, "path": str(path)}
+
+    folder = path if path.is_dir() else path.parent
+    if not folder.is_dir():
+        raise HTTPException(404, f"Model not found: {model_id}")
+    shutil.rmtree(folder)
+    return {"ok": True, "deleted": model_id, "path": str(folder)}
+
+
 @app.get("/api/models/{model_name}/download")
 def api_download_uploaded(model_name: str):
-    """Download an uploaded model folder as a zip."""
-    import io
-
+    """Backward-compat: download uploaded model folder as a zip."""
     model_name = _sanitize_name(model_name)
     dest = (UPLOADS / model_name).resolve()
     if not _is_under(dest, UPLOADS):
         raise HTTPException(400, "Invalid name")
     if not dest.is_dir():
         raise HTTPException(404, f"Uploaded model not found: {model_name}")
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for path in sorted(dest.rglob("*")):
-            if not path.is_file():
-                continue
-            if path.name.startswith("."):
-                continue
-            zf.write(path, path.relative_to(dest).as_posix())
-    data = buf.getvalue()
+    data, filename = _zip_model_bytes("miner", dest)
     return Response(
         content=data,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{model_name}.zip"',
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(data)),
+        },
+    )
+
+
+@app.get("/api/model/download")
+def api_download_model(model_id: str):
+    """Download any discovered model (miner folder or .pt) as a zip."""
+    kind, path = _resolve_model(model_id)
+    path = path.resolve()
+    if not (_is_under(path, ID_ROOT) or _is_under(path, HERE)):
+        raise HTTPException(400, "Path outside project roots")
+    if kind == "miner":
+        folder = path if path.is_dir() else path.parent
+        data, filename = _zip_model_bytes("miner", folder)
+    else:
+        data, filename = _zip_model_bytes("pt", path)
+    return Response(
+        content=data,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
             "Content-Length": str(len(data)),
         },
     )
@@ -1611,12 +1814,10 @@ def api_download_uploaded(model_name: str):
 
 @app.post("/api/unload")
 def api_unload(model_id: str = Form(...)):
+    removed = _evict_model_cache(model_id)
     with _cache_lock:
-        prefix = f"{model_id}:::"
-        removed = [k for k in list(_model_cache) if k == model_id or k.startswith(prefix)]
-        for key in removed:
-            _model_cache.pop(key, None)
-    return {"ok": True, "removed": removed, "remaining": list(_model_cache)}
+        remaining = list(_model_cache)
+    return {"ok": True, "removed": removed, "remaining": remaining}
 
 
 if __name__ == "__main__":

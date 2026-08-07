@@ -1075,7 +1075,7 @@
         <button class="btn btn-primary" type="button" id="uploadBtn">Upload to server</button>
         <div class="upload-progress" id="uploadProgress" aria-hidden="true"><i id="uploadProgressBar"></i></div>
         <div class="upload-status" id="uploadStatus"></div>
-        <p class="upload-hint">Saved under <code>viewer/uploads/</code>. Same name replaces the existing model.</p>
+        <p class="upload-hint">Saved under <code>uploads/</code>. Same name replaces the existing model.</p>
       </div>
     </aside>
 
@@ -1487,7 +1487,7 @@
         `<div>${m.group} · ${m.kind}</div>` +
         `<div>${w} · ${mb} MB</div>` +
         `<div>${m.path}</div>`;
-      els.modelActions.style.display = m.uploaded ? "flex" : "none";
+      els.modelActions.style.display = "flex";
       syncPtControls(m);
       loadHistory();
     }
@@ -1902,12 +1902,13 @@
 
     async function deleteUploaded() {
       const m = selectedModel();
-      if (!m || !m.uploaded) return;
-      if (!confirm(`Delete uploaded model "${m.name}"?`)) return;
+      if (!m) return;
+      const where = m.uploaded ? "uploaded model" : "model from disk";
+      if (!confirm(`Delete ${where} "${m.name}"?\n\n${m.path}\n\nThis cannot be undone.`)) return;
       setStatus(`Deleting ${m.name}…`, "busy");
       try {
-        const res = await fetch(`/api/models/${encodeURIComponent(m.name)}`, { method: "DELETE" });
-        const data = await res.json();
+        const res = await fetch(`/api/model?model_id=${encodeURIComponent(m.id)}`, { method: "DELETE" });
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(detailMessage(data.detail) || res.statusText);
         await loadModels();
         setStatus(`Deleted ${m.name}`);
@@ -1918,12 +1919,12 @@
 
     async function downloadUploaded() {
       const m = selectedModel();
-      if (!m || !m.uploaded) return;
-      const filename = `${m.name}.zip`;
+      if (!m) return;
+      const filename = `${(m.name || "model").replace(/[\\/]/g, "_")}.zip`;
       els.downloadBtn.disabled = true;
       setStatus(`Downloading ${filename}…`, "busy");
       try {
-        const res = await fetch(`/api/models/${encodeURIComponent(m.name)}/download`);
+        const res = await fetch(`/api/model/download?model_id=${encodeURIComponent(m.id)}`);
         if (!res.ok) {
           let detail = res.statusText;
           try {
@@ -1936,12 +1937,14 @@
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = filename;
+        const cd = res.headers.get("Content-Disposition") || "";
+        const mFilename = /filename="?([^";]+)"?/i.exec(cd);
+        a.download = mFilename ? mFilename[1] : filename;
         document.body.appendChild(a);
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 2000);
-        setStatus(`Downloaded ${filename} (${formatBytes(blob.size)})`);
+        setStatus(`Downloaded ${a.download} (${formatBytes(blob.size)})`);
       } catch (e) {
         setStatus(String(e.message || e), "error");
       } finally {

@@ -52,7 +52,7 @@ Open `http://127.0.0.1:7860`.
 | `DETECTOR_HOST` | `0.0.0.0` | Bind address |
 | `DETECTOR_PORT` | `7860` | Port |
 | `DETECTOR_DEVICE` | `auto` | `auto` \| `cpu` \| `cuda` |
-| `DETECTOR_ROOT` | auto | Root used for model IDs / sibling `layer` & `full` trees |
+| `DETECTOR_ROOT` | auto | Root for model IDs; parent workspace when sibling miner/`.pt` trees exist |
 | `DETECTOR_SCAN_ROOTS` | empty | Extra model dirs (`:` on Unix, `;` on Windows) |
 
 On macOS, `auto` may use the CoreML ONNX Runtime EP when available.
@@ -69,5 +69,5 @@ pm2 save
 ## Layout
 
 - Upload models via the UI → stored under `uploads/`
-- Optional sibling workspace: `layer/models`, `full/exports`, etc. (scanned when present under `DETECTOR_ROOT`)
+- Auto-scan under `DETECTOR_ROOT` for `miner.py` + `.onnx` packages and preferred `.pt` weights (`best.pt`, `weights.pt`, …), including `layer/`, `full/`, `finetune/models`, `finetune/deploy`, and sibling folders like `best/` / `origin/`
 - Result cache: `cache/results/`
